@@ -1,2 +1,3 @@
 # island-evo
-Island model with evolutionary dynamics
+
+Code for island model, with evolutionary dynamics.

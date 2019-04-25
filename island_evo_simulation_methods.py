@@ -2,6 +2,7 @@ import numpy as np
 import math
 import scipy.signal
 import time
+import scipy.optimize as opt
 
 class ManyIslandsSim:
     # Many islands simulation that saves island-average over all epochs >= sample_epoch_start. This saving happens after each epoch.
@@ -649,7 +650,7 @@ class InfiniteIslandsSim:
 class ExtinctionTimeLong:
     # Simulation with many islands that allows extinctions. 
     # Removes types that are extinct to speed up simulation.
-    # Saves data after each epoch: island-averages, extinction times, correlation function over each epoch
+    # Saves data after each epoch: island-averages, extinction times, correlation function, migration fitness over each epoch
 
     # Frequency normalization
     # Time normalization: simulation is in "natural normalization". Intermediate timescale is t = K**(1/2). Long timescale is t = K**(1/2)*(temperature)
@@ -755,7 +756,7 @@ class ExtinctionTimeLong:
         self.V1 = V1 #current V during simulation
         self.K1 = K1 #current K during simulation
 
-        species_indices = np.arange(K)  #list of species original indicies
+        species_indices = np.arange(K)  #list of species original indices
         surviving_bool = xbar0[0,:]>-np.inf
 
         ########### Initialize variables.
@@ -764,6 +765,9 @@ class ExtinctionTimeLong:
         self.n_mean_ave_list = []
         self.n2_mean_ave_list = []
         self.n_cross_mean_list = []
+        self.mig_mean_list = [] # ratio nbar/n
+        self.eta_mean_list = [] # eta computed from V, <n>
+        self.eta_from_antisymmetric = np.zeros((K)) # eta computed from (V-V.T)/2
         self.lambda_mean_ave_list = []
 
         self.n_mean_std_list = []
@@ -779,6 +783,8 @@ class ExtinctionTimeLong:
         epoch = 0
         current_time = 0
 
+        self.eta_from_antisymmetric = antisym_etas(V) # eta calculated using antisymmetric fixed point
+
         ########### Run dynamics
         while epoch<self.epoch_num:
             epoch += 1
@@ -790,6 +796,7 @@ class ExtinctionTimeLong:
             n2_mean_array = np.zeros((D,K1))
             n_cross_mean_array = np.zeros((K1))
             lambda_mean_array = np.zeros((D))
+            mig_mean_array = np.zeros((K1))
 
             new_extinct_bool = False  #boolean for whether new extinctions have occured during epoch.
 
@@ -821,10 +828,16 @@ class ExtinctionTimeLong:
                     
                     n0 = np.exp(xbar0)*y0
                     n_mean_array += n0
-                    n2_mean_array +=  n0**2
+                    n2_mean_array += n0**2
                     n_cross_mean_array += (np.sum(n0,axis=0)**2 - np.sum(n0**2,axis=0))/(D*(D-1))
-                    
+                    nbar = np.mean(n0, axis=0).reshape((1,-1)) # island averaged abundance
+                    temp_rats = np.divide(nbar, n0) # remove infinities
+                    temp_rats[~(np.isfinite(temp_rats))] = 0
+
+                    mig_mean_array += np.mean(temp_rats, axis=0)
+
                     lambda_mean_array += np.einsum('di,ij,dj->d',n0,V1,n0)
+
 
     
                 ######### Step abundances forward
@@ -851,11 +864,13 @@ class ExtinctionTimeLong:
             n_mean_array *= 1/count_short
             n2_mean_array *= 1/count_short
             n_cross_mean_array *= 1/count_short
+            mig_mean_array *= 1/count_short
             lambda_mean_array *= 1/count_short
 
             n_mean_ave = np.zeros((K))
             n2_mean_ave = np.zeros((K))
             n_cross_mean = np.zeros((K))
+            mig_mean_ave = np.zeros((K))
 
             n_mean_std = np.zeros((K))
             n2_mean_std = np.zeros((K))
@@ -864,11 +879,21 @@ class ExtinctionTimeLong:
             n_mean_ave[species_indices] = np.mean(n_mean_array,axis=0)
             n2_mean_ave[species_indices] = np.mean(n_mean_array,axis=0)
             n_cross_mean[species_indices] = n_cross_mean_array
+            mig_mean_ave[species_indices] = mig_mean_array
             lambda_mean_ave = np.mean(lambda_mean_array,axis=0)
+
 
             n_mean_std[species_indices] = np.std(n_mean_array,axis=0)
             n2_mean_std[species_indices]= np.std(n_mean_array,axis=0)
             lambda_mean_std = np.std(lambda_mean_array,axis=0)
+
+
+            # compute estimate of etas, from mean field calculations. Assuming close to antisymmetric.
+
+            sig_V = np.sqrt(np.var(V1)) # standard deviation of interaction matrix
+            K_surv = np.sum(surviving_bool)
+            chi = sig_V*np.sqrt(K_surv) # numerical estimate of chi
+            eta_mean_ave = -self.gamma*chi*n_mean_ave+np.dot(V, n_mean_ave)-m*(mig_mean_ave-1)
 
             self.Calculate(n_traj)
 
@@ -877,6 +902,8 @@ class ExtinctionTimeLong:
             self.n_mean_ave_list.append(n_mean_ave)
             self.n2_mean_ave_list.append(n2_mean_ave)
             self.n_cross_mean_list.append(n_cross_mean)
+            self.mig_mean_list.append(mig_mean_ave)
+            self.eta_mean_list.append(eta_mean_ave)
             self.lambda_mean_ave_list.append(lambda_mean_ave)
 
             self.n_mean_std_list.append(n_mean_std)
@@ -889,27 +916,24 @@ class ExtinctionTimeLong:
 
             np.savez(file_name, class_obj = class_dict)
 
-
-            ####### Change number of surviving species. 
+            ####### Change number of surviving species.
             if new_extinct_bool is True:
-
-                surviving_bool = xbar0[0,:]>-np.inf  #surviving species out of K1 current species.
+                surviving_bool = xbar0[0, :] > -np.inf  # surviving species out of K1 current species.
                 species_indices = species_indices[surviving_bool]
 
                 K1 = np.sum(surviving_bool)
-                V1_new = V1[surviving_bool,:][:,surviving_bool]
+                V1_new = V1[surviving_bool, :][:, surviving_bool]
                 V1 = V1_new
 
                 self.K1 = K1
                 self.V1 = V1
 
-                y0 = y0[:,surviving_bool]
-                xbar0 = xbar0[:,surviving_bool]
+                y0 = y0[:, surviving_bool]
+                xbar0 = xbar0[:, surviving_bool]
 
-                deriv = define_deriv_many_islands(V1,N,u,m,normed)  #redefine deriv with new V1. 
+                deriv = define_deriv_many_islands(V1, N, u, m, normed)  # redefine deriv with new V1.
                 step_forward = step_rk4_many_islands
 
-            
             ###### End simulation after too many extinctions
             
             if K1 <= 4:
@@ -1144,3 +1168,80 @@ def step_rk4_infinite_islands(y0,xbar0,xbar_inf,m,dt,deriv):
     return y1, xbar0
 
 
+def antisym_etas(V,sig_A = None):
+    """
+    For interaction matrix close to antisymmetric, compute average noise <eta> as if matrix were antisymmetric
+    :param V: Interaction matrix
+    :param sig_A: standard deviation of elements A_{ij} if known beforehand
+    :return: array of length K containing estimated eta values
+    """
+    A = (V-V.T)/2 # closest antisymmetric matrix. Normalization preserves magnitude of V almost antisymmetric.
+    K = np.shape(A)[0] # total number of types
+
+    p_star = find_fixed_pt(A)  # saturated fixed point
+    K_alive = count_alive(p_star, 0.1/K**2)  # count surviving types
+
+    # compute response integral chi to convert <n> to <eta>
+    if sig_A==None:
+        # estimate magnitude of A numerically
+        chi = np.sqrt(K_alive*np.sum(np.dot(A, A.T))/(K**2))
+    else:
+        # use given scale, assume half survive
+        chi = sig_A*np.sqrt(K_alive)
+
+
+    etas = np.dot(A,p_star) # negative fitnesses of extinct types
+    etas = etas+chi*p_star # resccaled <n> for alive types
+
+    return etas
+
+def lv_to_lp(A):
+    """
+    Generate parameters for lp to find fixed points
+    :param A: antisymmetric matrix
+    :return c, A_ub, b_ub, A_eq, b_eq: linear program parameters for linprog from scipy.optimize.
+    """
+    N = np.shape(A)[0]
+    # augment value v of "game" to end of variables. Trying to minimize v.
+    c = np.zeros(N + 1)
+    c[-1] = 1
+
+    # inequality constraints
+
+    A_ub = np.zeros((N, N + 1))
+    b_ub = np.zeros(N)
+
+    # max fitness bounded by v
+
+    A_ub[:, :-1] = A
+    A_ub[:, -1] = -1
+
+    # equality constraint: probabilities sum to 1
+    A_eq = np.ones((1, N + 1))
+    A_eq[0, -1] = 0
+    b_eq = np.ones(1)
+
+    return c, A_ub, b_ub, A_eq, b_eq
+
+def find_fixed_pt(A):
+    """
+    Find saturated fixed point of antisymmetric LV model using linear programming
+    :param A: Interaction matrix
+    :return: saturated fixed point
+    """
+    N = np.shape(A)[0]
+    maxiter = int(np.max(((N**2)/25,1000)))
+    c, A_ub, b_ub, A_eq, b_eq = lv_to_lp(A)
+    result = opt.linprog(c,A_ub,b_ub,A_eq,b_eq,options={'maxiter':maxiter},method='interior-point')
+    return result.x[:-1]
+
+def count_alive(fs,min_freq=None):
+    """
+    Count number of types with non-zero abundance
+    :param fs: array of frequencies
+    :param min_freq: cutoff frequency for measuring alive types
+    :return: Number of types with non-zero abundance
+    """
+    if min_freq==None:
+        min_freq = 0.01/len(fs)**2
+    return np.sum([f>min_freq for f in fs])

@@ -4,6 +4,178 @@ import scipy.signal
 import time
 import scipy.optimize as opt
 
+
+def single_epoch_island_evo_sim(n0,sim_time,species_params,sim_params):
+    # input V: (K,K) matrix of interactions for current species
+    # input n0: (D,K) vector of initial frequencies for current species
+    # input species_params: dictionary of species parameters like interactions.
+    # input sim_params: dictionary of simulation parameters
+    # output n1: final abundances
+    # output sim_time: time of simulation at end of epoch
+    # output averages: dictionary of averaged quantities. 
+
+    dt = sim_params['dt']
+    epoch_steps = sim_params['epoch_num']
+    averages = {}
+
+    for step in range(epoch_steps):
+
+        averages = compute_averages_island_evo_sim(n0,step,sim_time,averages,species_params,sim_params)
+
+        # Step abundances forward
+        n1 = step_forward_island_evo_sim(n0,species_params,sim_params)
+        n1, species_params = extinctions_island_evo_sim(n1,sim_time,species_params,sim_params)
+
+        # Prep for next time step
+        n0 = n1
+        sim_time += dt
+        ######### end epoch time steps
+        
+
+    return n1, sim_time, averages, species_params
+
+
+def set_time_params(dt,epoch_time,sample_time,coarse_sample_time,sim_params):
+
+    sim_params['dt'] = dt
+    sim_params['epoch_num'] = int(epoch_time/dt)
+    sim_params['sample_num'] = int(sample_time/dt)
+    sim_params['coarse_sample_num'] = int(coarse_sample_time/dt)
+
+    sim_params['epoch_time'] = dt*sim_params['epoch_num']
+    sim_params['sample_time'] = dt*sim_params['sample_num']
+    sim_params['coarse_sample_time'] = dt*sim_params['coarse_sample_num']
+
+    return sim_params
+        
+
+def step_forward_island_evo_sim(n0,species_params,sim_params):
+    
+    # input species_params: dictionary of parameter values for current species 
+    ## V: (K,K) matrix of interactions
+    ## fitness diffs: 0 or (1,K) matrix of fitness differences
+    ## self_interactions: 0 or (1,K) matrix of self interactions
+
+    # Define parameters
+    D = sim_params['D']
+    dt = sim_params['dt']
+    m = sim_params['m']
+
+    V = species_params['V']
+    fitness_diffs = species_params['fitness_diffs']
+    self_interactions = species_params['self_interactions']
+
+
+    # Runge-Kutta 4 step
+    
+    dt_vec = dt*np.array([0,0.5,0.5,1])
+    ndot_dict = {}
+    ndot = np.zeros(np.shape(n0))
+    
+    for ii in range(4):
+
+        n = n0+dt_vec[ii]*ndot   # n for runge-kutta step
+
+        # Compute time derivate of n
+        growth_rate = fitness_diffs + np.einsum('dj,ij',n,V) - self_interactions*n
+        norm_factor = np.einsum('di,di->d',n,growth_rate)
+        norm_factor = np.reshape(norm_factor,(D,1))
+
+        nbar = np.mean(n,axis=0)
+        if m==0:
+            ndot = n*(growth_rate - norm_factor)
+        else:
+            ndot = n*(growth_rate - norm_factor) + m*(nbar - n)
+
+        ndot_dict[ii] = ndot
+
+    n1 = n0 + (dt/6)*(1*ndot_dict[0] + 2*ndot_dict[1] + 2*ndot_dict[2] + 1*ndot_dict[3])
+
+    n1 = normalize_island_evo_sim(n1)
+
+    return n1
+
+
+def extinctions_island_evo_sim(n,sim_time,species_params,sim_params):
+
+    (D,K) = np.shape(n)
+
+    #local extinctions
+    logN = sim_params['logN']  #extinctions at log n = - logN
+    new_local_extinction_bool = np.zeros((D,K),dtype='bool')
+    new_local_extinction_bool[n>0] = np.log(n[n>0]) <= -logN
+    n[new_local_extinction_bool] = 0
+
+    #global extinctions
+    nbar = np.mean(n,axis=0)
+    extinction_times = species_params['extinction_times']
+    new_global_extinction_bool = np.logical_and(nbar==0,extinction_times==np.inf)
+    extinction_times[new_global_extinction_bool] = sim_time
+    species_params['extinction_times'] = extinction_times
+
+    n = normalize_island_evo_sim(n)
+
+    return n, species_params
+
+
+def normalize_island_evo_sim(n0):
+
+    total_pop = np.sum(n0,axis=1,keepdims=True)
+    n1 = n0/total_pop
+
+    return n1
+
+
+def compute_averages_island_evo_sim(n0,step,sim_time,averages,species_params,sim_params):
+
+    if step % sim_params['sample_num'] == 0:
+
+        V = species_params['V']
+
+        nbar = np.mean(n0,axis=0)
+        lagrange = np.einsum('di,ij,dj',n0,V,n0)/sim_params['D']
+
+        n_temp = 1. * n0
+        n_temp[n0==0] = np.exp(-sim_params['logN'])  #put extinct types at n = 1/N for computing migration term.
+        migration_term = sim_params['m']*np.mean(nbar/n_temp,axis=0)
+
+        if averages == {}:
+            averages['nbar_running'] = nbar
+            averages['lagrange_running'] = lagrange
+            averages['migration_term_running'] = migration_term
+            averages['count'] = 1
+
+            averages['nbar_list'] = []
+            averages['lagrange_list'] = []
+            averages['migration_term_list'] = []
+            averages['sim_time_list'] = []
+        else:
+            averages['nbar_running'] += nbar
+            averages['lagrange_running'] += lagrange
+            averages['migration_term_running'] += migration_term
+            averages['count'] +=1
+
+    if step % sim_params['coarse_sample_num'] == sim_params['coarse_sample_num'] - 1:
+
+        count = averages['count']
+        (D,K) = np.shape(n0)
+
+        averages['nbar_list'].append(averages['nbar_running']/count)
+        averages['lagrange_list'].append(averages['lagrange_running']/count)
+        averages['migration_term_list'].append(averages['migration_term_running']/count)
+
+        averages['nbar_running'] = np.zeros((K))
+        averages['lagrange_running'] = np.zeros((K))
+        averages['migration_term_running'] = np.zeros((K))
+
+        averages['sim_time_list'].append(sim_time)
+
+        averages['count'] = 0
+
+    return averages
+
+
+
 class ManyIslandsSim:
     # Many islands simulation that saves island-average over all epochs >= sample_epoch_start. This saving happens after each epoch.
     # Quantities saved: histogram of log n for each type, island-averages, correlation function averaged over epochs

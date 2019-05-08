@@ -1367,7 +1367,7 @@ class bp_evo:
     # Time normalization: simulation is in "natural normalization". Short timescale is dt = K**(1/2)*M**(-1/2).
     # Long timescale is t = K**(1/2)*(temperature)
 
-    def __init__(self, file_name, D, B, P, F, M_b, M_p, thresh_b, thresh_p, inv_fac_b, inv_fac_p, dt, mu_b, mu_p,
+    def __init__(self, file_name, D, B, P, F, M_b, M_p, omega_b, omega_p, thresh_b, thresh_p, inv_fac_b, inv_fac_p, dt, mu_b, mu_p,
                  D_b, D_p, S, seed, epoch_timescale, epoch_num, sample_num):
 
         # input file_name: name of save file
@@ -1377,6 +1377,8 @@ class bp_evo:
         # input F: phenotype space dimension
         # input M_b: log(1/m_b) where m_b = migration rate
         # input M_p: log(1/m_p) where m_p = migration rate
+        # input omega_b: timescale for bacterial dynamics
+        # input omega_p: timescale for phage dynamics
         # input thresh_b: extinction threshold for log-frequency equal to log(1/N_b) for total population N_b.
         # input thresh_p: extinction threshold for log-frequency equal to log(1/N_p) for total population N_p.
         # input inv_fac_b: invasion factor, bacteria. Invading types start at number inv_fac*exp(thresh)
@@ -1401,6 +1403,8 @@ class bp_evo:
         self.F = F
         self.M_b = M_b
         self.M_p = M_p
+        self.omega_b = omega_b
+        self.omega_p = omega_p
         self.thresh_b = thresh_b
         self.thresh_p = thresh_p
         self.inv_fac_b = inv_fac_b
@@ -1452,23 +1456,22 @@ class bp_evo:
         self.b_init_list = [] # initial distribution of n
         self.b_mean_ave_list = [] # <n> over epoch
         self.b2_mean_ave_list = [] # <n^2> over epoch
-        self.b_cross_mean_list = []
         self.b_mig_mean_list = []  # ratio nbar/n
-        self.eta_b_mean_list = []  # eta computed from V, <n>
+        self.eta_b_list = []  # eta computed from V, <n>
+
+        self.b_mean_std_list = []
+        self.b2_mean_std_list = []
 
         self.b_extinct_time_array = np.inf * np.ones((self.B_tot))  # extinction times
         self.b_alive = np.zeros((self.B_tot, self.epoch_num + 2), dtype=bool)  # K x (epoch_num+2) matrix of which \
         # types are alive at a given time
 
-        self.p_mean_std_list = []
-        self.p2_mean_std_list = []
 
         self.p_init_list = []  # initial distribution of n
         self.p_mean_ave_list = []  # <n> over epoch
         self.p2_mean_ave_list = []  # <n^2> over epoch
-        self.p_cross_mean_list = []
         self.p_mig_mean_list = []  # ratio nbar/n
-        self.eta_p_mean_list = []  # eta computed from V, <n>
+        self.eta_p_list = []  # eta computed from V, <n>
 
         self.p_mean_std_list = []
         self.p2_mean_std_list = []
@@ -1490,13 +1493,13 @@ class bp_evo:
         b_idx = self.B
         p_idx = self.P
 
-        ### MICHAEL TO IMPLEMENT INIT FOR BP
-        n0 = initialization_many_islands(self.D, self.K, self.N, self.m, 'flat')
+        # Initialization of bp frequencies
+        b0, p0 = initialization_many_islands_bp(self.D, self.B, self.P, self.m_b, self.m_p, 'flat')
 
 
         # run first epoch to equilibrate
         ### MICHAEL TO FINISH IMPLEMENTATION OF evo_step
-        n0, n_traj_eq = self.evo_step(V,n0,1) # equilibration dynamics
+        b0, p0, b_traj_eq, p_traj_eq = self.evo_step(G,H,b0,p0,1) # equilibration dynamics
         self.b_traj_eq = b_traj_eq  # save first trajectory for debugging purposes
         self.p_traj_eq = p_traj_eq  # save first trajectory for debugging purposes
 
@@ -1505,7 +1508,14 @@ class bp_evo:
         for i in range(2,self.epoch_num+2):
             G,H,b0,p0,b_idx,p_idx = self.mut_step(G,H,b_idx,p_idx,b0,p0,i) # add new types
             ### MICHAEL TO IMPLEMENT evo_step
-            n0,n_traj_f = self.evo_step(G,H,b0,p0,i) # dynamics
+            b0,p0,b_traj_f,p_traj_f = self.evo_step(G,H,b0,p0,i) # dynamics
+
+            # save data
+
+            if i % 10 == 0:  #save data every 10 epochs
+                class_dict = vars(self)
+
+                np.savez(self.file_name, class_obj=class_dict)
 
         # save last trajectory for debugging purposes
         self.b_traj_f = b_traj_f
@@ -1515,26 +1525,36 @@ class bp_evo:
         class_dict = vars(self)
 
         np.savez(self.file_name, class_obj=class_dict)
+        
 
-    def evo_step(self,G,b0,p0,cur_epoch):
-        # Runs one epoch for the linear abundances. Returns nf (abundances for next timestep) and n_traj (sampled
+    def evo_step(self,G,H,b0,p0,cur_epoch):
+        # Runs one epoch for the linear abundances. Returns bf and pf (abundances for next timestep) and b_traj and p_traj (sampled
         # trajectories for a single island)
-        # n: (D,K) abundances
-        # xbar0: (1,K) log of island averaged abundances.
+        # b: (D,B) abundances
+        # p: (D,P) abundances
 
-        K = np.shape(n0)[1]
+        B = np.shape(b0)[1]
+        P = np.shape(p0)[1]
         D = self.D
-        m = self.m
+        m_b = self.m_b
+        m_p = self.m_p
         N = self.N
-        thresh = self.thresh
-        M = self.M
+        thresh_b = self.thresh_b
+        thresh_p = self.thresh_p
+        M_b = self.M_b
+        M_p = self.M_p
+
 
         # rescale time to appropriate fraction of short timescale
-        dt = self.dt * (K ** 0.5) * (M ** -0.5)
+        short_timescale_b = M_p**(-1/2)*P**(1/2)*self.omega_b**(-1) 
+        short_timescale_p = M_b**(-1/2)*B**(1/2)*self.omega_p**(-1) 
+        dt = self.dt * min(short_timescale_b, short_timescale_p)
         self.dt_list.append(dt)
 
         # epoch time
-        epoch_time = self.epoch_timescale*(K**0.5)*M  # epoch_timescale*(long timescale)
+        long_timescale_b = M_b**(3/2)*M_p**(-1/2)*P**(1/2)*self.omega_b**(-1) 
+        long_timescale_p = M_p**(3/2)*M_b**(-1/2)*B**(1/2)*self.omega_p**(-1) 
+        epoch_time = self.epoch_timescale*max(long_timescale_b,long_timescale_p)  # epoch_timescale*(long timescale)
         epoch_steps = int(epoch_time / dt)
         epoch_time = epoch_steps * dt
         self.epoch_time_list.append(epoch_time)  # save amount of time for current epoch
@@ -1550,18 +1570,13 @@ class bp_evo:
 
         # set up for dynamics
 
-        u = 0
-        normed = True
-        deriv = define_deriv_many_islands(V, N, u, m, normed)
-        step_forward = step_rk4_many_islands
+        deriv = define_deriv_many_islands_bp(G,H)
+        step_forward = step_rk4_many_islands_bp
 
-        nbar = np.mean(n0, axis=0, keepdims=True)
-        xbar0 = np.log(nbar)
-        y0 = n0 / nbar
-
-        n_alive = self.n_alive[:,cur_epoch-1]
-        species_indices = np.arange(self.K_tot)[n_alive]  # list of current species indices
-        surviving_bool = xbar0[0, :] > -np.inf
+        b_alive = self.b_alive[:,cur_epoch-1]
+        p_alive = self.p_alive[:,cur_epoch-1]
+        b_indices = np.arange(self.B_tot)[b_alive]
+        p_indices = np.arange(self.P_tot)[p_alive]  # list of current species indices
 
         current_time = 0
 
@@ -1569,19 +1584,24 @@ class bp_evo:
         #### initialize for epoch
         count_short = 0
 
-        n_mean_array = np.zeros((D, K))
-        n2_mean_array = np.zeros((D, K))
-        n_cross_mean_array = np.zeros((K))
-        lambda_mean_array = np.zeros((D))
-        mig_mean_array = np.zeros((K))
+
+        b_mean_array = np.zeros((D, B))
+        b2_mean_array = np.zeros((D, B))
+        b_lambda_mean_array = np.zeros((D))
+        b_mig_mean_array = np.zeros((B))
+
+        p_mean_array = np.zeros((D, P))
+        p2_mean_array = np.zeros((D, P))
+        p_lambda_mean_array = np.zeros((D))
+        p_mig_mean_array = np.zeros((P))
 
 
-        n0 = y0 * np.exp(xbar0)
-
-        self.n_init_list.append(n0)
+        self.b_init_list.append(b0)
+        self.p_init_list.append(p0)
 
         sample_steps = int(epoch_steps / self.sample_num) + 1
-        n_traj = np.zeros((K, sample_steps))
+        b_traj = np.zeros((B, sample_steps))
+        p_traj = np.zeros((P, sample_steps))
 
         # dynamics
         for step in range(epoch_steps):
@@ -1591,95 +1611,177 @@ class bp_evo:
                 ind = int(step // self.sample_num)
                 count_short += 1
 
-                n_traj[:, ind] = n0[0, :]
+                b_traj[:, ind] = b0[0, :]
+                p_traj[:, ind] = p0[0, :]
 
-                n0 = np.exp(xbar0) * y0
-                n_mean_array += n0
-                n2_mean_array += n0 ** 2
-                n_cross_mean_array += (np.sum(n0, axis=0) ** 2 - np.sum(n0 ** 2, axis=0)) / (D * (D - 1))
-                nbar = np.mean(n0, axis=0).reshape((1, -1))  # island averaged abundance
-                temp_rats = np.divide(nbar, n0)  # remove infinities
+                b_mean_array += b0
+                b2_mean_array += b0 ** 2
+                bbar = np.mean(b0, axis=0).reshape((1, -1))  # island averaged abundance
+                temp_rats = np.divide(bbar, b0)  # remove infinities
                 temp_rats[~(np.isfinite(temp_rats))] = 0
+                b_mig_mean_array += np.mean(temp_rats, axis=0)
+                b_lambda_mean_array += np.einsum('di,ij,dj->d', b0, H, p0)
 
-                mig_mean_array += np.mean(temp_rats, axis=0)
+                p_mean_array += p0
+                p2_mean_array += p0 ** 2
+                pbar = np.mean(p0, axis=0).reshape((1, -1))  # island averaged abundance
+                temp_rats = np.divide(pbar, p0)  # remove infinities
+                temp_rats[~(np.isfinite(temp_rats))] = 0
+                p_mig_mean_array += np.mean(temp_rats, axis=0)
+                p_lambda_mean_array += np.einsum('di,ij,dj->d', p0, G, b0)
 
-                lambda_mean_array += np.einsum('di,ij,dj->d', n0, V, n0)
-
+                
             ######### Step abundances forward
-            y1, xbar1 = step_forward(y0, xbar0, m, dt, deriv)
-            y1, xbar1 = Extinction(y1, xbar1, thresh)
-            y1, xbar1 = Normalize(y1, xbar1, N)
+            b1, p1 = step_forward(b0,p0,m_b,m_p,dt,deriv)
+            b1 = Extinction(b1,thresh_b)
+            p1 = Extinction(p1,thresh_b)
+            b1 = Normalize(b1)
+            p1 = Normalize(p1)
 
             ######### If extinctions occur, record ext time.
-            new_extinct = np.logical_and(xbar1[0, :] == -np.inf, self.extinct_time_array[species_indices] == np.inf)
-            if np.any(new_extinct):
-                new_extinct_indices = species_indices[new_extinct]
-                self.extinct_time_array[new_extinct_indices] = current_time+t0
-                new_extinct_bool = True
+            b_extinct_bool = np.all(b1==0,axis=0)
+            b_new_extinct = np.logical_and(b_extinct_bool, self.b_extinct_time_array[b_indices] == np.inf)
+            if np.any(p_new_extinct):
+                b_new_extinct_indices = b_indices[b_new_extinct]
+                self.b_extinct_time_array[b_new_extinct_indices] = current_time+t0
+                b_new_extinct_bool = True
+
+            p_extinct_bool = np.all(p1==0,axis=0)
+            p_new_extinct = np.logical_and(p_extinct_bool, self.p_extinct_time_array[p_indices] == np.inf)
+            if np.any(p_new_extinct):
+                p_new_extinct_indices = p_indices[p_new_extinct]
+                self.p_extinct_time_array[p_new_extinct_indices] = current_time+t0
+                p_new_extinct_bool = True
 
             ######### Prep for next time step
-            y0 = y1
-            xbar0 = xbar1
+            b0 = b1
+            p0 = p1
 
             current_time += dt
             ######### end epoch time steps
 
         ####### Compute averages
-        n_mean_array *= 1 / count_short
-        n2_mean_array *= 1 / count_short
-        n_cross_mean_array *= 1 / count_short
-        mig_mean_array *= 1 / count_short
-        lambda_mean_array *= 1 / count_short
+        b_mean_array *= 1 / count_short
+        b2_mean_array *= 1 / count_short
+        b_mig_mean_array *= 1 / count_short
+        b_lambda_mean_array *= 1 / count_short
+
+        p_mean_array *= 1 / count_short
+        p2_mean_array *= 1 / count_short
+        p_mig_mean_array *= 1 / count_short
+        p_lambda_mean_array *= 1 / count_short
 
 
         # Average and standard dev across islands.
-        n_mean_ave = np.mean(n_mean_array, axis=0)
-        n2_mean_ave = np.mean(n_mean_array, axis=0)
-        n_cross_mean = n_cross_mean_array
-        mig_mean_ave = mig_mean_array
-        lambda_mean_ave = np.mean(lambda_mean_array, axis=0)
+        b_mean_ave = np.mean(b_mean_array, axis=0)
+        b2_mean_ave = np.mean(b_mean_array, axis=0)
+        b_mig_mean_ave = b_mig_mean_array
+        b_lambda_mean_ave = np.mean(b_lambda_mean_array, axis=0)
 
-        n_mean_std = np.std(n_mean_array, axis=0)
-        n2_mean_std = np.std(n_mean_array, axis=0)
-        lambda_mean_std = np.std(lambda_mean_array, axis=0)
+        p_mean_ave = np.mean(p_mean_array, axis=0)
+        p2_mean_ave = np.mean(p_mean_array, axis=0)
+        p_mig_mean_ave = p_mig_mean_array
+        p_lambda_mean_ave = np.mean(p_lambda_mean_array, axis=0)
+
+        b_mean_std = np.std(b_mean_array, axis=0)
+        b2_mean_std = np.std(b_mean_array, axis=0)
+        b_lambda_mean_std = np.std(b_lambda_mean_array, axis=0)
+
+        p_mean_std = np.std(p_mean_array, axis=0)
+        p2_mean_std = np.std(p_mean_array, axis=0)
+        p_lambda_mean_std = np.std(p_lambda_mean_array, axis=0)
 
         # compute estimate of etas, from mean field calculations. Assuming close to antisymmetric.
 
-        sig_V = np.sqrt(np.var(V))  # standard deviation of interaction matrix
-        K_surv = np.sum(surviving_bool)
-        chi = sig_V * np.sqrt(K_surv)  # numerical estimate of chi
-        eta_mean_ave = -self.gamma * chi * n_mean_ave + np.dot(V, n_mean_ave) - m * (mig_mean_ave - 1)
+        # sig_V = np.sqrt(np.var(V))  # standard deviation of interaction matrix
+        # K_surv = np.sum(surviving_bool)
+        # chi = sig_V * np.sqrt(K_surv)  # numerical estimate of chi
+        # eta_mean_ave = -self.gamma * chi * n_mean_ave + np.dot(V, n_mean_ave) - m * (mig_mean_ave - 1)
+
+
+        # Compute estimate of eta. 
+        interactions = np.dot(H,p_mean_ave)
+        n_mean = b_mean_ave
+        chi0 = np.mean(interactions)/(gamma*np.mean(n_mean))
+        chi = chi0 
+        diff = 10
+        while diff>0.001/np.sqrt(P):   # loop that adds correction to chi to get mean bias for bias>0 and bias<0 to be same magnitude
+            bias = interactions - gamma*chi*n_mean
+            
+            bias_plus = np.mean(bias[bias>0])
+            bias_minus = np.mean(bias[bias<0])
+            n_plus = np.mean(b_mean[bias>0])
+            n_minus = np.mean(n_mean[bias<0])
+            chi = chi + (bias_plus + bias_minus)/(gamma*(n_plus + n_minus))  #correction
+            diff = np.abs(bias_plus+bias_minus)
+
+        eta_b = bias
+
+        interactions = np.dot(G,b_mean_ave)
+        n_mean = p_mean_ave
+        chi0 = np.mean(interactions)/(gamma*np.mean(n_mean))
+        chi = chi0 
+        diff = 10
+        while diff>0.001/np.sqrt(B):  
+            bias = interactions - gamma*chi*n_mean
+            
+            bias_plus = np.mean(bias[bias>0])
+            bias_minus = np.mean(bias[bias<0])
+            n_plus = np.mean(b_mean[bias>0])
+            n_minus = np.mean(n_mean[bias<0])
+            chi = chi + (bias_plus + bias_minus)/(gamma*(n_plus + n_minus))
+            diff = np.abs(bias_plus+bias_minus)
+
+        eta_p = bias
+
 
         #self.Calculate(n_traj)
 
         ######## Save data
 
-        self.n_mean_ave_list.append(n_mean_ave)
-        self.n2_mean_ave_list.append(n2_mean_ave)
-        self.n_cross_mean_list.append(n_cross_mean)
-        self.mig_mean_list.append(mig_mean_ave)
-        self.eta_mean_list.append(eta_mean_ave)
-        self.lambda_mean_ave_list.append(lambda_mean_ave)
+        self.b_mean_ave_list.append(b_mean_ave)
+        self.b2_mean_ave_list.append(b2_mean_ave)
+        self.b_mig_mean_list.append(b_mig_mean_ave)
+        self.eta_b_list.append(eta_b)
+        self.lambda_b_mean_ave_list.append(b_lambda_mean_ave)
 
-        self.n_mean_std_list.append(n_mean_std)
-        self.n2_mean_std_list.append(n2_mean_std)
-        self.lambda_mean_std_list.append(lambda_mean_std)
+        self.b_mean_std_list.append(b_mean_std)
+        self.b2_mean_std_list.append(b2_mean_std)
+        self.lambda_b_mean_std_list.append(b_lambda_mean_std)
+
+        self.p_mean_ave_list.append(p_mean_ave)
+        self.p2_mean_ave_list.append(p2_mean_ave)
+        self.p_mig_mean_list.append(p_mig_mean_ave)
+        self.eta_p_list.append(eta_p)
+        self.lambda_p_mean_ave_list.append(p_lambda_mean_ave)
+
+        self.p_mean_std_list.append(p_mean_std)
+        self.p2_mean_std_list.append(p2_mean_std)
+        self.lambda_p_mean_std_list.append(p_lambda_mean_std)
+
+
 
         # starting frequencies for next step
-        nf = np.exp(xbar0) * y0
+        bf = b0
+        pf = p0
 
         ####### Change number of surviving species.
-        surviving_bool = xbar0[0, :] > -np.inf  # surviving species out of K1 current species.
-        species_indices = species_indices[surviving_bool]
+        surviving_b = np.all(bf>0,axis=0)  # surviving species out of K1 current species.
+        surviving_p = np.all(pf>0,axis=0)
+        b_indices = b_indices[surviving_b]
+        p_indices = p_indices[surviving_b]
 
-        self.n_alive[species_indices,cur_epoch] = True
+
+        self.b_alive[b_indices,cur_epoch] = True
+        self.p_alive[p_indices,cur_epoch] = True
 
         # only pass surviving types to next timestep
-        nf = nf[:,surviving_bool]
+        bf = bf[:,surviving_b]
+        pf = pf[:,surviving_p]
 
         print(cur_epoch)
         ######## end of current epoch
-        return nf, n_traj
+        return bf, pf, b_traj_eq, p_traj_eq
 
     def mut_step(self,G,H,b_idx,p_idx,b0,p0,cur_epoch):
         """
@@ -1871,28 +1973,22 @@ class bp_evo:
         self.corr_tvec = np.float32(corr_tvec)
         self.autocorr_list.append(autocorr_sum)  # 1/K comes from normalization of V ~ 1/sqrt(K)
 
-    def Normalize(self, y, xbar, N):
-        n = np.exp(xbar) * y
+    def Normalize(self, n):
         Nhat = np.sum(n, axis=1, keepdims=True)
-        Yhat = np.mean(y * N / Nhat, axis=0, keepdims=True)
+        n1 = n/Nhat
 
-        Yhat[Yhat == 0] = 1
+        return n1
 
-        y1 = (y * N / Nhat) / Yhat
-        xbar1 = xbar + np.log(Yhat)
+    def Extinction(self, n, thresh):
+        x = np.log(n)
 
-        return y1, xbar1
+        local_ext_ind = x < thresh
+        n[local_ext_ind] = 0
 
-    def Extinction(self, y, xbar, thresh):
+        global_ext_ind = np.all(n == 0, axis=0)
+        n[:, global_ext_ind] = 0
 
-        local_ext_ind = xbar + np.log(y) < thresh
-        y[local_ext_ind] = 0
-
-        global_ext_ind = np.all(y == 0, axis=0)
-        xbar[:, global_ext_ind] = -np.inf
-        y[:, global_ext_ind] = 0
-
-        return y, xbar
+        return n
 
 
 #######################################################
@@ -1927,6 +2023,38 @@ def initialization_many_islands(D,K,N,m,mode):
         n = nhat/Nhat
 
     return n
+
+def initialization_many_islands_bp(D, B, P, m_b, m_p, 'flat'):
+    #:input D: number of islands
+    # input B: number of bacteria types
+    # input P: number of phage types
+    # input m_b: migration rate for bacteria
+    # input m_p: migration rate for phage
+    # input mode: type of initialization
+    # output b, p: bacteria and phage starting frequencies
+    
+    if mode=='equal':
+        b = np.random.exponential(1/B,(D,B))
+        
+        p = np.random.exponential(1/P,(D,P))
+        
+    elif mode=='flat':
+        x_min = np.log(m/B)
+        x_max = 0
+        random_vars = np.random.rand(D,B)
+        x = x_min + (x_max- x_min)*random_vars
+        b = np.exp(x)
+
+        x_min = np.log(m/P)
+        x_max = 0
+        random_vars = np.random.rand(D,P)
+        x = x_min + (x_max- x_min)*random_vars
+        p = np.exp(x)
+        
+    b = b / np.sum(b,axis=1,keepdims=1)
+    p = p / np.sum(p,axis=1,keepdims=1)
+
+    return b, p
 
 def generate_interactions_with_diagonal(K,gamma):
     # :param K: number of types
@@ -1997,6 +2125,37 @@ def define_deriv_many_islands(V,N,u,m,normed):
 
     return deriv
 
+def define_deriv_many_islands_bp(G,H):
+    # :input G, H: interaction matrices. G is P x B matrix, H is B x P matrix
+    # :input m_b, m_p: migration rate for bacteria and phage
+    # :output deriv: function of x that computes derivative
+
+    def deriv(b,p,m_b,m_p):
+        # input b,p: frequencies of bacteria and phage
+        D = np.shape(b)[0]
+        growth_rate_b = np.einsum('ij,dj',H,p)
+        growth_rate_p = np.einsum('ij,dj',G,b)
+        
+        norm_factor_b = np.einsum('di,di->d',b,growth_rate_b) #normalization factor
+        norm_factor_b = np.reshape(norm_factor_b,(D,1))
+
+        norm_factor_p = np.einsum('di,di->d',p,growth_rate_p) #normalization factor
+        norm_factor_p = np.reshape(norm_factor_p,(D,1))
+        
+        b_island_ave = np.mean(b,axis=0,keepdims=True)
+        p_island_ave = np.mean(p,axis=0,keepdims=True)
+
+        if m==0:
+            b_dot = b*(growth_rate_b - norm_factor_b) 
+            p_dot = p*(growth_rate_p - norm_factor_p) 
+        else:
+            b_dot = b*(growth_rate_b - norm_factor_b) + m*(b_island_ave - b)
+            p_dot = p*(growth_rate_p - norm_factor_p) + m*(p_island_ave - p)
+
+        return b_dot, p_dot
+
+    return deriv
+
 
 def define_deriv_infinite_islands(V,N,u,m,normed):
     # :input V: interaction matrix
@@ -2028,6 +2187,25 @@ def define_deriv_infinite_islands(V,N,u,m,normed):
         return y_dot
 
     return deriv
+
+
+def step_rk4_many_islands_bp(b0,p0,m_b,m_p,dt,deriv):
+    # :input x0: (K,) vec of current log variables
+    # :param dt: step size
+    # :function deriv: gives derivative of x. Function of x.
+    # :output x1: (K,) vec of log variables after one time step.
+    
+
+    k1_b, k1_p = deriv(b0,p0,m_b,m_p)
+    k2_b, k2_p = deriv(b0+(dt/2)*k1_b,p0+(dt/2)*k1_p,m_b,m_p)
+    k3_b, k3_p = deriv(b0+(dt/2)*k2_b,p0+(dt/2)*k2_p,m_b,m_p)
+    k4_b, k4_p = deriv(b0+dt*k3_b,p0+dt*k3_p,m_b,m_p)
+    
+    b1 = b0 + (dt/6)*(k1_b + 2*k2_b + 2*k3_b+k4_b)
+    p1 = p0 + (dt/6)*(k1_p + 2*k2_p + 2*k3_p+k4_p)
+    
+    return b1, p1
+
 
 
 def step_rk4_many_islands(y0,xbar0,m,dt,deriv):

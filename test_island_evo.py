@@ -16,7 +16,7 @@ def main():
     K = 100
     M = 10  #M = log(1/m)
     gamma = -0.998
-    logN=  10*M
+    logN = 10*M
     thresh = -logN
 
     t0 = K**(3/2)

@@ -1434,6 +1434,9 @@ class bp_evo:
         self.B_tot = self.B + self.epoch_num * self.mu_b  # total number of types through simulation
         self.P_tot = self.P + self.epoch_num * self.mu_p  # total number of types through simulation
 
+
+        self.vs = np.zeros((self.F,self.B_tot))
+        self.ws = np.zeros((self.F,self.P_tot))
         np.random.seed(seed=self.seed)
 
 
@@ -1498,8 +1501,7 @@ class bp_evo:
 
 
         # run first epoch to equilibrate
-        ### MICHAEL TO FINISH IMPLEMENTATION OF evo_step
-        b0, p0, b_traj_eq, p_traj_eq = self.evo_step(G,H,b0,p0,1) # equilibration dynamics
+        b0, p0, b_traj_eq, p_traj_eq,G,H = self.evo_step(G,H,b0,p0,1) # equilibration dynamics
         self.b_traj_eq = b_traj_eq  # save first trajectory for debugging purposes
         self.p_traj_eq = p_traj_eq  # save first trajectory for debugging purposes
 
@@ -1507,8 +1509,7 @@ class bp_evo:
         # evolution
         for i in range(2,self.epoch_num+2):
             G,H,b0,p0,b_idx,p_idx = self.mut_step(G,H,b_idx,p_idx,b0,p0,i) # add new types
-            ### MICHAEL TO IMPLEMENT evo_step
-            b0,p0,b_traj_f,p_traj_f = self.evo_step(G,H,b0,p0,i) # dynamics
+            b0,p0,b_traj_f,p_traj_f,G,H = self.evo_step(G,H,b0,p0,i) # dynamics
 
             # save data
 
@@ -1538,7 +1539,7 @@ class bp_evo:
         D = self.D
         m_b = self.m_b
         m_p = self.m_p
-        N = self.N
+
         thresh_b = self.thresh_b
         thresh_p = self.thresh_p
         M_b = self.M_b
@@ -1634,14 +1635,14 @@ class bp_evo:
             ######### Step abundances forward
             b1, p1 = step_forward(b0,p0,m_b,m_p,dt,deriv)
             b1 = Extinction(b1,thresh_b)
-            p1 = Extinction(p1,thresh_b)
+            p1 = Extinction(p1,thresh_p)
             b1 = Normalize(b1)
             p1 = Normalize(p1)
 
             ######### If extinctions occur, record ext time.
             b_extinct_bool = np.all(b1==0,axis=0)
             b_new_extinct = np.logical_and(b_extinct_bool, self.b_extinct_time_array[b_indices] == np.inf)
-            if np.any(p_new_extinct):
+            if np.any(b_new_extinct):
                 b_new_extinct_indices = b_indices[b_new_extinct]
                 self.b_extinct_time_array[b_new_extinct_indices] = current_time+t0
                 b_new_extinct_bool = True
@@ -1699,7 +1700,12 @@ class bp_evo:
         # eta_mean_ave = -self.gamma * chi * n_mean_ave + np.dot(V, n_mean_ave) - m * (mig_mean_ave - 1)
 
 
-        # Compute estimate of eta. 
+        # Compute estimate of eta.
+
+        # numerical estimate of gamma
+        sig_mat = np.cov(G.flatten(),H.T.flatten())
+        gamma = sig_mat[0,1]/np.sqrt(sig_mat[0,0]*sig_mat[1,1])
+
         interactions = np.dot(H,p_mean_ave)
         n_mean = b_mean_ave
         chi0 = np.mean(interactions)/(gamma*np.mean(n_mean))
@@ -1710,7 +1716,7 @@ class bp_evo:
             
             bias_plus = np.mean(bias[bias>0])
             bias_minus = np.mean(bias[bias<0])
-            n_plus = np.mean(b_mean[bias>0])
+            n_plus = np.mean(n_mean[bias>0])
             n_minus = np.mean(n_mean[bias<0])
             chi = chi + (bias_plus + bias_minus)/(gamma*(n_plus + n_minus))  #correction
             diff = np.abs(bias_plus+bias_minus)
@@ -1723,11 +1729,11 @@ class bp_evo:
         chi = chi0 
         diff = 10
         while diff>0.001/np.sqrt(B):  
-            bias = interactions - gamma*chi*n_mean
+            bias = interactions - gamma*chi*n_mean - np.mean(G)
             
             bias_plus = np.mean(bias[bias>0])
             bias_minus = np.mean(bias[bias<0])
-            n_plus = np.mean(b_mean[bias>0])
+            n_plus = np.mean(n_mean[bias>0])
             n_minus = np.mean(n_mean[bias<0])
             chi = chi + (bias_plus + bias_minus)/(gamma*(n_plus + n_minus))
             diff = np.abs(bias_plus+bias_minus)
@@ -1769,7 +1775,7 @@ class bp_evo:
         surviving_b = np.all(bf>0,axis=0)  # surviving species out of K1 current species.
         surviving_p = np.all(pf>0,axis=0)
         b_indices = b_indices[surviving_b]
-        p_indices = p_indices[surviving_b]
+        p_indices = p_indices[surviving_p]
 
 
         self.b_alive[b_indices,cur_epoch] = True
@@ -1781,7 +1787,7 @@ class bp_evo:
 
         print(cur_epoch)
         ######## end of current epoch
-        return bf, pf, b_traj_eq, p_traj_eq
+        return bf, pf, b_traj, p_traj,G[np.ix_(surviving_p,surviving_b)],H[np.ix_(surviving_b,surviving_p)]
 
     def mut_step(self,G,H,b_idx,p_idx,b0,p0,cur_epoch):
         """
@@ -1836,28 +1842,29 @@ class bp_evo:
         H_new[0:B, 0:P] = H
 
         # new phenotypes
-        self.gen_new_phenos(self,b_idx,p_idx,cur_epoch,b0,p0)
+        self.gen_new_phenos(b_idx,p_idx,cur_epoch,b0,p0)
 
         # new interaction matrices
-        p_alive = self.p_alive[:, cur_epoch]
-        b_alive = self.b_alive[:, cur_epoch]
+        p_alive = self.p_alive[:, cur_epoch-1]
+        b_alive = self.b_alive[:, cur_epoch-1]
 
-        old_vs = self.vs[:, b_idx:(b_idx + self.mu_b)]
-        new_vs = self.vs[:, b_alive]
 
-        old_ws = self.ws[:,p_idx:(p_idx+self.mu_p)]
-        new_ws = self.ws[:,p_alive]
+        new_vs = self.vs[:, b_idx:(b_idx + self.mu_b)]
+        old_vs = self.vs[:, b_alive]
+
+        new_ws = self.ws[:,p_idx:(p_idx+self.mu_p)]
+        old_ws = self.ws[:,p_alive]
 
         G_new[P:,0:B],H_new[0:B,P:] = self.int_from_pheno(old_vs,new_ws) # new phage old bact
         G_new[0:P,B:],H_new[B:,0:P] = self.int_from_pheno(new_vs,old_ws) # new bact old phage
-        G_new[P:,B:],H_new[B:,P:] = self.int_from_pheno(new_vs,new_vs) # new bact new phage
+        G_new[P:,B:],H_new[B:,P:] = self.int_from_pheno(new_vs,new_ws) # new bact new phage
 
         return G_new,H_new
 
     def gen_random_phenos(self,B,P):
         F = self.F
-        vs = np.random.randn((F,B))
-        ws = np.random.randn((F,P))
+        vs = np.random.randn(F,B)
+        ws = np.random.randn(F,P)
 
         for i in range(B):
             vs[:,i] = vs[:,i]/np.linalg.norm(vs[:,i])
@@ -1887,53 +1894,53 @@ class bp_evo:
             # invasion by random types
             self.vs[:,b_idx:(b_idx+self.mu_b)], _ = self.gen_random_phenos(self.mu_b,0)
         else:
-            for i in range(self.mut_b):
+            for i in range(self.mu_b):
                 # pick a bacteria to mutate
                 b_mut = np.random.multinomial(1, b_bar)
                 # generate mutants
-                for k,I in b_mut:
+                for k,I in enumerate(b_mut):
                     if I!=0:
                         # initialize with parent's phenotype vector
                         self.vs[:,b_idx+i] = self.vs[:,b_types[k]]
                         # add perturbation
                         if np.shape(D_b)==():
-                            self.vs[:,b_idx+i] += np.dot(np.sqrt(D_b), np.random.normal(size=(1, F)))/np.sqrt(F)
+                            self.vs[:,b_idx+i] += np.dot(np.sqrt(D_b), np.random.normal(F))/np.sqrt(F)
                         else:
                             self.vs[:,b_idx+i] += np.real(np.dot(np.linalg.sqrtm(D_b),
-                                                                 np.random.normal(size=(1, F))))/np.sqrt(F)
+                                                                 np.random.normal(F)))/np.sqrt(F)
                         # normalize
                         self.vs[:,b_idx+i] = self.vs[:,b_idx+i]/np.linalg.norm(self.vs[:,b_idx+i])
                         break
 
-                # phage mutation
-                if self.D_p == None:
-                    # invasion by random types
-                    _, self.ws[:, p_idx:(p_idx + self.mu_p)]= self.gen_random_phenos(0,self.mu_p)
-                else:
-                    for i in range(self.mut_p):
-                        # pick a bacteria to mutate
-                        p_mut = np.random.multinomial(1, p_bar)
-                        # generate mutants
-                        for k, I in p_mut:
-                            if I != 0:
-                                # initialize with parent's phenotype vector
-                                self.ws[:, p_idx + i] = self.ws[:, p_types[k]]
-                                # add perturbation
-                                if np.shape(D_p) == ():
-                                    self.ws[:, p_idx + i] += np.dot(np.sqrt(D_p),
-                                                                    np.random.normal(size=(1, F))) / np.sqrt(F)
-                                else:
-                                    self.ps[:, p_idx + i] += np.real(np.dot(np.linalg.sqrtm(D_p),
-                                                                            np.random.normal(size=(1, F)))) / np.sqrt(F)
-                                # normalize
-                                self.ws[:, p_idx + i] = self.ws[:, p_idx + i] / np.linalg.norm(self.ws[:, p_idx + i])
-                                break
+        # phage mutation
+        if self.D_p == None:
+            # invasion by random types
+            _, self.ws[:, p_idx:(p_idx + self.mu_p)] = self.gen_random_phenos(0,self.mu_p)
+        else:
+            for i in range(self.mu_p):
+                # pick a bacteria to mutate
+                p_mut = np.random.multinomial(1, p_bar)
+                # generate mutants
+                for k, I in enumerate(p_mut):
+                    if I != 0:
+                        # initialize with parent's phenotype vector
+                        self.ws[:, p_idx + i] = self.ws[:, p_types[k]]
+                        # add perturbation
+                        if np.shape(D_p) == ():
+                            self.ws[:, p_idx + i] += np.dot(np.sqrt(D_p),
+                                                            np.random.normal(F)) / np.sqrt(F)
+                        else:
+                            self.ps[:, p_idx + i] += np.real(np.dot(np.linalg.sqrtm(D_p),
+                                                                    np.random.normal(F))) / np.sqrt(F)
+                        # normalize
+                        self.ws[:, p_idx + i] = self.ws[:, p_idx + i] / np.linalg.norm(self.ws[:, p_idx + i])
+                        break
 
     def int_from_pheno(self,vs,ws):
         B = np.shape(vs)[1]
         P = np.shape(ws)[1]
         G = np.zeros((P,B))
-        H = np.zeros((B, P))
+        H = np.zeros((B,P))
 
         for i in range(B):
             for j in range(P):
@@ -2024,7 +2031,7 @@ def initialization_many_islands(D,K,N,m,mode):
 
     return n
 
-def initialization_many_islands_bp(D, B, P, m_b, m_p, 'flat'):
+def initialization_many_islands_bp(D, B, P, m_b, m_p, mode='flat'):
     #:input D: number of islands
     # input B: number of bacteria types
     # input P: number of phage types
@@ -2039,13 +2046,13 @@ def initialization_many_islands_bp(D, B, P, m_b, m_p, 'flat'):
         p = np.random.exponential(1/P,(D,P))
         
     elif mode=='flat':
-        x_min = np.log(m/B)
+        x_min = np.log(m_b/B)
         x_max = 0
         random_vars = np.random.rand(D,B)
         x = x_min + (x_max- x_min)*random_vars
         b = np.exp(x)
 
-        x_min = np.log(m/P)
+        x_min = np.log(m_p/P)
         x_max = 0
         random_vars = np.random.rand(D,P)
         x = x_min + (x_max- x_min)*random_vars
@@ -2145,13 +2152,14 @@ def define_deriv_many_islands_bp(G,H):
         b_island_ave = np.mean(b,axis=0,keepdims=True)
         p_island_ave = np.mean(p,axis=0,keepdims=True)
 
-        if m==0:
-            b_dot = b*(growth_rate_b - norm_factor_b) 
-            p_dot = p*(growth_rate_p - norm_factor_p) 
+        if m_b==0:
+            b_dot = b*(growth_rate_b - norm_factor_b)
         else:
-            b_dot = b*(growth_rate_b - norm_factor_b) + m*(b_island_ave - b)
-            p_dot = p*(growth_rate_p - norm_factor_p) + m*(p_island_ave - p)
-
+            b_dot = b*(growth_rate_b - norm_factor_b) + m_b*(b_island_ave - b)
+        if m_p==0:
+            p_dot = p * (growth_rate_p - norm_factor_p)
+        else:
+            p_dot = p * (growth_rate_p - norm_factor_p) + m_p * (p_island_ave - p)
         return b_dot, p_dot
 
     return deriv

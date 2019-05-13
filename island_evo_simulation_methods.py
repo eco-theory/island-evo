@@ -1131,7 +1131,7 @@ class AntisymEvo:
         epoch_steps = int(epoch_time / dt)
         epoch_time = epoch_steps * dt
         self.epoch_time_list.append(epoch_time)  # save amount of time for current epoch
-        t0 = np.sum(self.epoch_time_list[0:cur_epoch])  # initial time, used for calculation of extinction time
+        t0 = np.sum(self.epoch_time_list[0:(cur_epoch-1)])  # initial time, used for calculation of extinction time
 
         # self.sample_time_short = 1
         sample_time = dt * self.sample_num
@@ -1559,7 +1559,7 @@ class bp_evo:
         epoch_steps = int(epoch_time / dt)
         epoch_time = epoch_steps * dt
         self.epoch_time_list.append(epoch_time)  # save amount of time for current epoch
-        t0 = np.sum(self.epoch_time_list[0:cur_epoch])  # initial time, used for calculation of extinction time
+        t0 = np.sum(self.epoch_time_list[0:(cur_epoch-1)])  # initial time, used for calculation of extinction time
 
         # self.sample_time_short = 1
         sample_time = dt * self.sample_num

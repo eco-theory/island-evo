@@ -1011,7 +1011,8 @@ class AntisymEvo:
     # Time normalization: simulation is in "natural normalization". Short timescale is dt = K**(1/2)*M**(-1/2).
     # Long timescale is t = K**(1/2)*(temperature)
 
-    def __init__(self, file_name, D, K, M, gamma, thresh, inv_fac, dt, mu, seed, epoch_timescale, epoch_num, sample_num):
+    def __init__(self, file_name, D, K, M, gamma, thresh, inv_fac, dt, mu, seed, epoch_timescale, epoch_num,
+                 sample_num, c_A=None):
 
         # input file_name: name of save file
         # input D: number of islands
@@ -1026,6 +1027,7 @@ class AntisymEvo:
         # input epoch_timescale: time for each epoch, units of M*K**0.5
         # input epoch_num: number of epochs
         # input sample_num: sampling period
+        # input c_A: correlation of new types with previous ones
 
         self.file_name = file_name
         self.D = D
@@ -1040,6 +1042,7 @@ class AntisymEvo:
         self.mu = mu
         self.seed = seed
         self.sample_num = sample_num
+        self.c_A = c_A
 
         self.SetParams()
 
@@ -1058,7 +1061,9 @@ class AntisymEvo:
 
         np.random.seed(seed=self.seed)
 
-        self.V = generate_interactions_with_diagonal(self.K_tot, self.gamma) # generate full interaction matrix at start
+        if self.c_A==None:
+            # if children are random, generate full interaction matrix at start
+            self.V = generate_interactions_with_diagonal(self.K_tot, self.gamma)
 
         self.increment = 0.01 * self.M  # increment for histogram
 
@@ -1093,12 +1098,16 @@ class AntisymEvo:
 
 
         # run first epoch to equilibrate
-        V = self.V[np.ix_(np.arange(0,self.K),np.arange(0,self.K))] # pick right subset of V
+        if self.c_A==None:
+            V = self.V[np.ix_(np.arange(0,self.K),np.arange(0,self.K))] # pick right subset of V
+        else:
+            # if children related, generate original interactions
+            V = generate_interactions_with_diagonal(self.K, self.gamma)
         n0, n_traj_eq = self.evo_step(V,n0,1) # equilibration dynamics
         self.n_traj_eq = n_traj_eq  # save first trajectory for debugging purposes
         # evolution
         for i in range(2,self.epoch_num+2):
-            V,n0 = self.mut_step(n0,i) # add new types
+            V,n0 = self.mut_step(V,n0,i) # add new types
             n0,n_traj_f = self.evo_step(V,n0,i) # dynamics
 
         # save last trajectory for debugging purposes
@@ -1274,7 +1283,7 @@ class AntisymEvo:
         ######## end of current epoch
         return nf, n_traj
 
-    def mut_step(self,n0,cur_epoch):
+    def mut_step(self,V,n0,cur_epoch):
         """
         Generate new mutants and update list of alive types accordingly
         :param n0: Current distribution of types (DxK matrix)
@@ -1296,9 +1305,34 @@ class AntisymEvo:
         for i in range(D):
             n0_new[i,:] = n0_new[i,:]/np.sum(n0_new[i,:])
         n_alive = self.n_alive[:,cur_epoch-1]
-        V = self.V[np.ix_(n_alive,n_alive)] # active interactions
+        if self.c_A==None:
+            V = self.V[np.ix_(n_alive,n_alive)] # active interactions
+        else:
+            V = self.gen_related_interactions(V) # generate new interactions via descent
 
         return V,n0_new
+
+    def gen_related_interactions(self,V):
+        c_A = self.c_A
+        mu = self.mu
+        K = np.shape(V)[0]
+        V_new = np.zeros((K+self.mu,K+self.mu))
+        V_new[0:K, 0:K] = V
+        # generate new types from random parents
+        cov_mat = [[1.,self.gamma],[self.gamma,1.]]
+        for k in range(mu):
+            par_idx = np.random.randint(0, K)  # parent index
+            if self.gamma==-1:
+                z_vec = np.random.randn(K+k)
+                V_new[K + k, 0:(K + k)] = c_A * V_new[par_idx, 0:(K + k)] + np.sqrt(1 - c_A ** 2) * z_vec  # row
+                V_new[0:(K + k), K + k] = c_A * V_new[0:(K + k), par_idx] - np.sqrt(1 - c_A ** 2) * z_vec  # column
+                V_new[K + k, K + k] = 0  # diagonal
+            else:
+                z_mat = np.random.multivariate_normal(cov=cov_mat,size=(K+k))  # 2 x (K+k) matrix of differences from parent
+                V_new[K + k, 0:(K + k)] = c_A * V_new[par_idx, 0:(K + k)] + np.sqrt(1 - c_A ** 2) * z_mat[0,:]  # row
+                V_new[0:(K + k), K + k] = c_A * V_new[0:(K + k),par_idx] + np.sqrt(1 - c_A ** 2) * z_mat[1,:]  # column
+                V_new[K+k,K+k] = 0 # diagonal
+        return V_new
 
     def Calculate(self, n_traj):
         # Compute correlation function and add to autocorr_list

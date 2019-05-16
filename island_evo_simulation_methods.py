@@ -1123,6 +1123,10 @@ class AntisymEvo:
         # save last trajectory for debugging purposes
         self.n_traj_f = n_traj_f
 
+        # save last V for correlated evolution
+        if self.c_A!=None:
+            self.V = V
+
         # save data
         self.sim_end_time = time.time()
         class_dict = vars(self)
@@ -1289,7 +1293,7 @@ class AntisymEvo:
 
         # only pass surviving types to next timestep
         nf = nf[:,surviving_bool]
-        V_surv = V[surviving_bool,surviving_bool]
+        V_surv = V[np.ix_(surviving_bool,surviving_bool)]
 
         print(cur_epoch)
         ######## end of current epoch
@@ -1302,6 +1306,7 @@ class AntisymEvo:
         :param cur_epoch: Current epoch
         :return: V - current interaction matrix, n0_new - distribution of types with new mutants
         """
+
         species_indices = np.arange(self.K_tot)[self.n_alive[:,cur_epoch-1]] # indices of alive types
         K = len(species_indices)
         D = self.D
@@ -1319,11 +1324,11 @@ class AntisymEvo:
         
         n_alive = self.n_alive[:,cur_epoch-1]
         if self.c_A==None:
-            V = self.V[np.ix_(n_alive,n_alive)] # active interactions
+            V_new = self.V[np.ix_(n_alive,n_alive)] # active interactions
         else:
-            V = self.gen_related_interactions(V) # generate new interactions via descent
+            V_new = self.gen_related_interactions(V) # generate new interactions via descent
 
-        return V,n0_new
+        return V_new,n0_new
 
     def gen_related_interactions(self,V):
         c_A = self.c_A
@@ -1331,6 +1336,7 @@ class AntisymEvo:
         K = np.shape(V)[0]
         V_new = np.zeros((K+self.mu,K+self.mu))
         V_new[0:K, 0:K] = V
+
         # generate new types from random parents
         cov_mat = [[1.,self.gamma],[self.gamma,1.]]
         for k in range(mu):
@@ -1345,6 +1351,7 @@ class AntisymEvo:
                 V_new[K + k, 0:(K + k)] = c_A * V_new[par_idx, 0:(K + k)] + np.sqrt(1 - c_A ** 2) * z_mat[:,0]  # row
                 V_new[0:(K + k), K + k] = c_A * V_new[0:(K + k),par_idx] + np.sqrt(1 - c_A ** 2) * z_mat[:,1]  # column
                 V_new[K+k,K+k] = 0 # diagonal
+
         return V_new
 
     def Calculate(self, n_traj):

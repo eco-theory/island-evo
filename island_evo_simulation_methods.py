@@ -1104,12 +1104,14 @@ class AntisymEvo:
         else:
             # if children related, generate original interactions
             V = generate_interactions_with_diagonal(self.K, self.gamma)
-        n0, n_traj_eq = self.evo_step(V,n0,1) # equilibration dynamics
+        
+        n0, n_traj_eq, V = self.evo_step(V,n0,1) # equilibration dynamics
         self.n_traj_eq = n_traj_eq  # save first trajectory for debugging purposes
         # evolution
         for i in range(2,self.epoch_num+2):
+
             V,n0 = self.mut_step(V,n0,i) # add new types
-            n0,n_traj_f = self.evo_step(V,n0,i) # dynamics
+            n0,n_traj_f, V = self.evo_step(V,n0,i) # dynamics
 
             # periodically save in case simulation terminates in cluster.
             if i % 10 ==0:
@@ -1287,10 +1289,11 @@ class AntisymEvo:
 
         # only pass surviving types to next timestep
         nf = nf[:,surviving_bool]
+        V_surv = V[surviving_bool,surviving_bool]
 
         print(cur_epoch)
         ######## end of current epoch
-        return nf, n_traj
+        return nf, n_traj, V_surv
 
     def mut_step(self,V,n0,cur_epoch):
         """
@@ -1313,6 +1316,7 @@ class AntisymEvo:
         # normalize
         for i in range(D):
             n0_new[i,:] = n0_new[i,:]/np.sum(n0_new[i,:])
+        
         n_alive = self.n_alive[:,cur_epoch-1]
         if self.c_A==None:
             V = self.V[np.ix_(n_alive,n_alive)] # active interactions
@@ -1337,9 +1341,9 @@ class AntisymEvo:
                 V_new[0:(K + k), K + k] = c_A * V_new[0:(K + k), par_idx] - np.sqrt(1 - c_A ** 2) * z_vec  # column
                 V_new[K + k, K + k] = 0  # diagonal
             else:
-                z_mat = np.random.multivariate_normal(cov=cov_mat,size=(K+k))  # 2 x (K+k) matrix of differences from parent
-                V_new[K + k, 0:(K + k)] = c_A * V_new[par_idx, 0:(K + k)] + np.sqrt(1 - c_A ** 2) * z_mat[0,:]  # row
-                V_new[0:(K + k), K + k] = c_A * V_new[0:(K + k),par_idx] + np.sqrt(1 - c_A ** 2) * z_mat[1,:]  # column
+                z_mat = np.random.multivariate_normal([0,0],cov=cov_mat,size=(K+k))  # 2 x (K+k) matrix of differences from parent
+                V_new[K + k, 0:(K + k)] = c_A * V_new[par_idx, 0:(K + k)] + np.sqrt(1 - c_A ** 2) * z_mat[:,0]  # row
+                V_new[0:(K + k), K + k] = c_A * V_new[0:(K + k),par_idx] + np.sqrt(1 - c_A ** 2) * z_mat[:,1]  # column
                 V_new[K+k,K+k] = 0 # diagonal
         return V_new
 

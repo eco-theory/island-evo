@@ -1040,6 +1040,7 @@ class AntisymEvo:
         self.mu = mu
         self.seed = seed
         self.sample_num = sample_num
+        self.sim_start_time = time.time()
 
         self.SetParams()
 
@@ -1101,10 +1102,18 @@ class AntisymEvo:
             V,n0 = self.mut_step(n0,i) # add new types
             n0,n_traj_f = self.evo_step(V,n0,i) # dynamics
 
+            # periodically save in case simulation terminates in cluster.
+            if i % 10 ==0:
+                self.sim_end_time = time.time()
+                self.n_traj_f = n_traj_f
+                class_dict = vars(self)
+                np.savez(self.file_name, class_obj=class_dict)
+
         # save last trajectory for debugging purposes
         self.n_traj_f = n_traj_f
 
         # save data
+        self.sim_end_time = time.time()
         class_dict = vars(self)
 
         np.savez(self.file_name, class_obj=class_dict)

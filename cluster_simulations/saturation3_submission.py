@@ -20,15 +20,18 @@ def main():
             file.write("""#!/bin/bash
 #
 #SBATCH --job-name=s3_{ind0}
-#SBATCH --output=error_files/s3_{ind0}.out
-#SBATCH --error=error_files/s3_{ind0}.err
+#SBATCH --output=error_files/s3_{ind0}_%a.out
+#SBATCH --error=error_files/s3_{ind0}_%a.err
 
 #SBATCH --time={hours:02d}:{mins:02d}:00
+#SBATCH --array=0-{rep}
 #SBATCH -p normal
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 
-srun python3 saturation3.2.py {ind0}""".format(ind0 = ind0,hours=hours,mins=mins))
+srun python3 saturation3.py {ind0} $SLURM_ARRAY_TASK_ID""".format(ind0 = ind0,rep = rep_num-1, hours=hours,mins=mins))
+
+
 
         os.system("sbatch {}".format(file_name))
 

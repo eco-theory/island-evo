@@ -8,7 +8,7 @@ import island_evo_simulation_methods as ie
 def main():
     #sys.argv[0] is name of script.
     ind0 = int(sys.argv[1])
-    # ind1 = int(sys.argv[2])
+    ind1 = int(sys.argv[2])
     # ind2 = int(sys.argv[3])
 
     K_list = [75,100,200,300,400]

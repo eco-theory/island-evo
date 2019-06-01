@@ -1598,6 +1598,8 @@ class bp_evo:
         thresh_p = self.thresh_p
         M_b = self.M_b
         M_p = self.M_p
+        omega_b = self.omega_b
+        omega_p = self.omega_p
 
 
         # rescale time to appropriate fraction of short timescale
@@ -2251,7 +2253,7 @@ def define_deriv_infinite_islands(V,N,u,m,normed):
     return deriv
 
 
-def step_rk4_many_islands_bp(b0,p0,m_b,m_p,dt,deriv):
+def step_rk4_many_islands_bp(b0,p0,m_b,m_p,dt,deriv,omega_b,omega_p):
     # :input x0: (K,) vec of current log variables
     # :param dt: step size
     # :function deriv: gives derivative of x. Function of x.
@@ -2263,8 +2265,8 @@ def step_rk4_many_islands_bp(b0,p0,m_b,m_p,dt,deriv):
     k3_b, k3_p = deriv(b0+(dt/2)*k2_b,p0+(dt/2)*k2_p,m_b,m_p)
     k4_b, k4_p = deriv(b0+dt*k3_b,p0+dt*k3_p,m_b,m_p)
     
-    b1 = b0 + (dt/6)*(k1_b + 2*k2_b + 2*k3_b+k4_b)
-    p1 = p0 + (dt/6)*(k1_p + 2*k2_p + 2*k3_p+k4_p)
+    b1 = b0 + omega_b*(dt/6)*(k1_b + 2*k2_b + 2*k3_b+k4_b)
+    p1 = p0 + omega_p*(dt/6)*(k1_p + 2*k2_p + 2*k3_p+k4_p)
     
     return b1, p1
 

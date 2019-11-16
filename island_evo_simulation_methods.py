@@ -16,7 +16,7 @@ class IslandsEvo:
     # Long timescale is t = K**(1/2)*(temperature)
 
     def __init__(self, file_name, D, K, m, gamma, thresh, invasion_freq, dt, mu, seed, epoch_timescale, epoch_num,
-                 sample_num, corr_mut=0, n_init=None, V_init = None, epochs_to_save_traj = None):
+                 sample_num, corr_mut=0, sig_S=0, n_init=None, V_init = None, S_init = None, epochs_to_save_traj = None):
 
         # input file_name: name of save file
         # input D: number of islands
@@ -32,8 +32,10 @@ class IslandsEvo:
         # input epoch_num: number of epochs
         # input sample_num: sampling period
         # input corr_mut: correlation of new types with previous ones
+        # input sig_S: standard dev. of selective differences
         # input n_init: (D,K) array of frequencies to start from.
-        # input V_init: (K,K) array of interactions to start from.
+        # input V_init: (K,K) array of interactions to start with.
+        # input S_init: (1,K) array of selective differences to start with.
         # input epochs_to_save_traj: list of ints with index of epoch to save trajectories.
         #       If -1 is included then the most current epoch is also saved.
 
@@ -53,9 +55,11 @@ class IslandsEvo:
         self.sample_num = sample_num
         self.sim_start_time = time.time()
         self.corr_mut = corr_mut
+        self.sig_S = sig_S
         self.epochs_to_save_traj = epochs_to_save_traj
         self.n_init = n_init
         self.V_init = V_init
+        self.S_init = S_init
 
         if n_init is not None:
             self.K0 = n_init.shape[1]
@@ -78,24 +82,25 @@ class IslandsEvo:
         self.parent_idx_dict = {}
         self.K_tot = self.K0  #current total number of species
 
-        V, n0 = self.initialize_interactions_abundances()
+        self.initialize_interactions_abundances()
 
         # evolution
         for cur_epoch in range(self.epoch_num+1):
-            V, n0 = self.evo_step(V,n0,cur_epoch,SavedQuants) # dynamics for one epoch. V, n0 are for non-extinct types
-            V, n0 = self.mut_step(V, n0)  # add new types
+            self.evo_step(cur_epoch, SavedQuants) # dynamics for one epoch. V, n0 are for non-extinct types
+            self.mut_step()  # add new types
             # Save data in case job terminates on cluster
-            self.V = V
-            self.n0 = n0
             self.save_data(SavedQuants)
             print(cur_epoch)
 
 
-    def evo_step(self,V,n0,cur_epoch,SavedQuants):
+    def evo_step(self, cur_epoch, SavedQuants):
         # Runs one epoch for the linear abundances. Returns nf (abundances for next timestep) and n_traj (sampled
         # trajectories for a single island)
         # n: (D,K) abundances
         # xbar0: (1,K) log of island averaged abundances.
+        V = self.V
+        S = self.S
+        n0 = self.n0
 
         K = np.shape(n0)[1]
         D = self.D
@@ -105,7 +110,7 @@ class IslandsEvo:
 
         M = self.define_M(K,m)
 
-        dt, epoch_steps, sample_steps, deriv, step_forward = self.setup_epoch(K,M,V)
+        dt, epoch_steps, sample_steps, deriv, step_forward = self.setup_epoch(K,M,V,S)
 
         Normalize = self.Normalize
         Extinction = self.Extinction
@@ -119,7 +124,7 @@ class IslandsEvo:
         self.starting_species_idx_list.append(self.current_species_idx)  #Add current species indices to list.
 
         # initialize for epoch
-        SavedQuants.initialize_epoch(D,K,V,sample_steps)
+        SavedQuants.initialize_epoch(D,K,V,S,sample_steps)
 
         # dynamics
         for step in range(epoch_steps):
@@ -142,31 +147,35 @@ class IslandsEvo:
         SavedQuants.add_to_lists(cur_epoch)
 
         ####### Change number of surviving species.
-        V, n0 = self.subset_to_surviving_species(y0,xbar0)
+        self.subset_to_surviving_species(y0,xbar0)
 
-        ######## end of current epoch
-        return V, n0
 
     def initialize_interactions_abundances(self):
         if self.V_init is None:
             V = generate_interactions_with_diagonal(self.K0, self.gamma)
         else:
             V = self.V_init
-        self.V = V
 
         if self.n_init is None:
             n0 = initialization_many_islands(self.D, self.K0, self.N, self.m, 'flat')
         else:
             n0 = self.n_init
 
-        return V, n0
+        if self.S_init is None:
+            S = self.sig_S*np.random.normal(size=(1,self.K0))
+        else:
+            S = self.S_init
+
+        self.n0 = n0
+        self.V = V
+        self.S = S
 
     def define_M(self,K,m):
         #Define log-migration parameter
         M = np.log(1/(m*np.sqrt(K)))
         return M
 
-    def setup_epoch(self,K,M,V):
+    def setup_epoch(self,K,M,V,S):
         # rescale time to appropriate fraction of short timescale
         dt = self.dt * (K ** 0.5) * (M ** -0.5)
         self.dt_list.append(dt)
@@ -180,7 +189,7 @@ class IslandsEvo:
 
         u = 0
         normed = True
-        deriv = define_deriv_many_islands(V, self.N, u, self.m, normed)
+        deriv = define_deriv_many_islands_selective_diffs(V, S, self.N, u, self.m, normed)
         step_forward = step_rk4_many_islands
 
         return dt, epoch_steps, sample_steps, deriv, step_forward
@@ -191,19 +200,23 @@ class IslandsEvo:
 
         # only pass surviving types to next timestep
         n0 = np.exp(xbar0) * y0
-        n0 = n0[:, surviving_bool]
-        V = self.V[np.ix_(surviving_bool, surviving_bool)]
-        return V, n0
+        self.n0 = n0[:, surviving_bool]
+        self.V = self.V[np.ix_(surviving_bool, surviving_bool)]
+        self.S = self.S[:,surviving_bool]
 
-    def mut_step(self,V,n0):
+    def mut_step(self):
         """
         Generate new mutants and update list of alive types accordingly
         :param n0: Current distribution of types (DxK matrix)
         :return: V - current interaction matrix, n0_new - distribution of types with new mutants
         """
+        V = self.V
+        S = self.S
+        n0 = self.n0
+
         mu = self.mu
         K = np.shape(V)[0]
-        V_new, parent_idx_list = self.gen_related_interactions(V)  # generate new interactions via descent
+        V_new, S_new, parent_idx_list = self.gen_related_interactions(V,S)  # generate new interactions via descent
 
         # set new invasion types
         n0_new = self.next_epoch_abundances(mu, n0)
@@ -215,7 +228,9 @@ class IslandsEvo:
             self.parent_idx_dict[K_tot+idx] = parent_idx_list[idx]
         self.K_tot = K_tot + mu
 
-        return V_new, n0_new
+        self.V = V_new
+        self.S = S_new
+        self.n0 = n0_new
 
     def next_epoch_abundances(self,mu,n0):
         D = self.D
@@ -226,12 +241,14 @@ class IslandsEvo:
         n0_new = n0_new/np.sum(n0_new,axis=1,keepdims=True)
         return n0_new
 
-    def gen_related_interactions(self,V):
+    def gen_related_interactions(self,V,S):
         corr_mut = self.corr_mut
         mu = self.mu
         K = np.shape(V)[0]
         V_new = np.zeros((K+self.mu,K+self.mu))
         V_new[0:K, 0:K] = V
+        S_new = np.zeros((1,K+self.mu))
+        S_new[0,0:K] = S
 
         # generate new types from random parents
         cov_mat = [[1.,self.gamma],[self.gamma,1.]]
@@ -249,7 +266,9 @@ class IslandsEvo:
                 V_new[idx, 0:idx] = corr_mut * V_new[par_idx, 0:idx] + np.sqrt(1 - corr_mut ** 2) * z_mat[:,0]  # row
                 V_new[0:idx, idx] = corr_mut * V_new[0:idx,par_idx] + np.sqrt(1 - corr_mut ** 2) * z_mat[:,1]  # column
                 V_new[idx,idx] = np.sqrt(1+self.gamma)*np.random.normal() # diagonal
-        return V_new, parent_idx_list
+
+            S_new[0,idx] = corr_mut*S[0,par_idx] + np.sqrt(1-corr_mut**2)*self.sig_S*np.random.normal()
+        return V_new, S_new, parent_idx_list
 
     def save_data(self,SavedQuants):
         self.sim_end_time = time.time()
@@ -295,10 +314,13 @@ class EvoSavedQuantities:
         self.lambda_mean_std_list = []
         self.force_mean_ave_list = []
         self.force_mean_std_list = []
+        self.S_mean_ave_list = []
+        self.S_mean_std_list = []
         self.n_traj_dict = {}
 
-    def initialize_epoch(self,D,K,V,sample_steps):
+    def initialize_epoch(self,D,K,V,S,sample_steps):
         self.V = V
+        self.S = S
         self.count_short = 0
         self.n_mean_array = np.zeros((D, K))
         self.n2_mean_array = np.zeros((D, K))
@@ -335,14 +357,21 @@ class EvoSavedQuantities:
         force_mean_ave = np.mean(force_mean,axis=0)
         force_mean_std = np.std(force_mean, axis=0)
 
+        S_mean = np.sum(self.S*self.n_mean_array,axis=1)
+        S_mean_ave = np.mean(S_mean)
+        S_mean_std = np.std(S_mean)
+
         self.n_mean_ave_list.append(n_mean_ave)
         self.n2_mean_ave_list.append(n2_mean_ave)
         self.lambda_mean_ave_list.append(lambda_mean_ave)
         self.force_mean_ave_list.append(force_mean_ave)
+        self.S_mean_ave_list.append(S_mean_ave)
+
         self.n_mean_std_list.append(n_mean_std)
         self.n2_mean_std_list.append(n2_mean_std)
         self.lambda_mean_std_list.append(lambda_mean_std)
         self.force_mean_std_list.append(force_mean_std)
+        self.S_mean_std_list.append(S_mean_std)
 
         self.save_traj(cur_epoch)
 
@@ -359,6 +388,7 @@ class EvoSavedQuantities:
         keys = list(var_dict.keys())
         keys.remove('n_traj')
         keys.remove('V')
+        keys.remove('S')
 
         for key in keys:
             data[key] = var_dict[key]
@@ -2512,6 +2542,36 @@ def generate_interactions_with_diagonal(K,gamma):
     
     return V
 
+def define_deriv_many_islands_selective_diffs(V, S, N, u, m, normed):
+    # :input V: interaction matrix
+    # :input u: self interaction strength
+    # :input m: migration rate
+    # :input xbar: (D,K) log of nbar abundance
+    # :input normed: logical bit for whether to normalize derivative or not
+    # :output deriv: function of x that computes derivative
+    # y = n/nbar
+
+    def deriv(y, xbar, m):
+        n = np.exp(xbar) * y
+        D = np.shape(n)[0]
+        growth_rate = S - u * (n) + np.einsum('dj,ij', n, V)
+
+        if normed is True:
+            norm_factor = np.einsum('di,di->d', n, growth_rate) / N  # normalization factor
+            norm_factor = np.reshape(norm_factor, (D, 1))
+        else:
+            norm_factor = 0
+
+        y_dot0 = y * (growth_rate - norm_factor)
+
+        if m == 0:
+            y_dot = y_dot0
+        else:
+            y_dot = y_dot0 + m * (1 - y)
+
+        return y_dot
+
+    return deriv
 
 def define_deriv_many_islands(V,N,u,m,normed):
     # :input V: interaction matrix

@@ -59,7 +59,10 @@ class IslandsEvo:
         self.sim_start_time = time.time()
         self.corr_mut = corr_mut
         self.sig_S = sig_S
-        self.epochs_to_save_traj = epochs_to_save_traj
+        if epochs_to_save_traj is None:
+            self.epochs_to_save_traj = []
+        else:
+            self.epochs_to_save_traj = epochs_to_save_traj
         self.n_init = n_init
         self.V_init = V_init
         self.S_init = S_init
@@ -229,7 +232,7 @@ class IslandsEvo:
         deriv = define_deriv_many_islands_selective_diffs(V, S, self.N, u, self.m, normed)
         step_forward = step_rk4_many_islands
 
-        return dt, epoch_steps, sample_steps, deriv, step_forward
+        return epoch_steps, sample_steps, step_forward
 
     def subset_to_surviving_species(self,y0,xbar0,cur_epoch):
         surviving_bool = xbar0[0, :] > -np.inf  # surviving species out of K1 current species.

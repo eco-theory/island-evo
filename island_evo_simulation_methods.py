@@ -3,6 +3,18 @@ import math
 import scipy.signal
 import time
 import scipy.optimize as opt
+from multiprocessing import Pool
+import dill
+
+# def apply_pool_map(pool,func,args_list):
+#     # One function.
+#     # args: list of arguments
+#     dumps= [dill.dumps((func,args)) for args in args_list]
+#     return pool.map(run_dill_encoded,dumps)
+#
+# def run_dill_encoded(dump):
+#     func, args = dill.loads(dump)
+#     return func(*args)
 
 class IslandsEvo:
     # Simulation with many islands with random invasion of new types.
@@ -15,8 +27,8 @@ class IslandsEvo:
     # Time normalization: simulation is in "natural normalization". Short timescale is dt = K**(1/2)*M**(-1/2).
     # Long timescale is t = K**(1/2)*(temperature)
 
-    def __init__(self, file_name, D, K, m, gamma, thresh, invasion_freq, dt, mu, seed, epoch_timescale, epoch_num,
-                 sample_num, corr_mut=0, sig_S=0, n_init=None, V_init = None, S_init = None, epochs_to_save_traj = None,
+    def __init__(self, file_name, D, K, m, gamma, thresh, dt, mu, seed, epoch_timescale, epoch_num,
+                 sample_num, invasion_freq_factor = 1, corr_mut=0, sig_S=0, n_init=None, V_init = None, S_init = None, epochs_to_save_traj = None,
                  long_epochs=None,long_factor=1,invasion_criteria_memory=100,invasion_eig_buffer=0.1):
 
         # input file_name: name of save file
@@ -25,7 +37,7 @@ class IslandsEvo:
         # input m: migration rate
         # input gamma: symmetry parameter
         # input thresh: extinction threshold for log-frequency equal to log(1/N) for total population N.
-        # input invasion_freq: frequency for new invasions.
+        # input invasion_freq_factor: new invasions come in at freq invasion_freq_factor/K
         # input dt: rescaled step size, typically choose 0.1
         # input mu: number of types invading per epoch
         # input seed: random seed
@@ -49,7 +61,7 @@ class IslandsEvo:
         self.gamma = gamma
         self.N = 1  #frequency normalization
         self.thresh = thresh
-        self.invasion_freq = invasion_freq
+        self.invasion_freq_factor = invasion_freq_factor
         self.epoch_timescale = epoch_timescale
         self.epoch_num = epoch_num
         self.dt = dt
@@ -102,16 +114,18 @@ class IslandsEvo:
 
         self.initialize_interactions_abundances()  #Sets V, S, and n0. Define V_dict and S_full
 
-
         # evolution
         for cur_epoch in range(self.epoch_num+1):
             self.evo_step(cur_epoch, SavedQuants) # dynamics for one epoch. V, n0 are for non-extinct types
             self.mut_step(SavedQuants)  # add new types
             # Save data in case job terminates on cluster
             self.save_data(SavedQuants)
-            print(cur_epoch)
 
-        return
+            num_types = self.n0.shape[1]
+            if num_types <= 10+self.mu:
+                break
+
+            print(cur_epoch)
 
 
     def evo_step(self, cur_epoch, SavedQuants):
@@ -119,6 +133,7 @@ class IslandsEvo:
         # trajectories for a single island)
         # n: (D,K) abundances
         # xbar0: (1,K) log of island averaged abundances.
+
         V = self.V
         S = self.S
         n0 = self.n0
@@ -131,7 +146,7 @@ class IslandsEvo:
 
         M = self.define_M(K,m)
 
-        dt, epoch_steps, sample_steps, deriv, step_forward = self.setup_epoch(cur_epoch,K,M,V,S)
+        epoch_steps, sample_steps, step_forward = self.setup_epoch(cur_epoch,K,M,V,S)
 
         Normalize = self.Normalize
         Extinction = self.Extinction
@@ -151,11 +166,11 @@ class IslandsEvo:
         for step in range(epoch_steps):
 
             # Save values each dt = sample_time
-            SavedQuants.save_sample(step,y0,xbar0)
+            SavedQuants.save_sample(step,y0,xbar0,cur_epoch)
 
             # Step abundances forward
-            y1, xbar1 = step_forward(y0, xbar0, m, dt, deriv)
-            y1, xbar1 = Extinction(y1, xbar1, thresh)
+            y1, xbar1 = step_forward(y0,xbar0)
+            y1, xbar1 = Extinction(y1, xbar0, thresh)
             y1, xbar1 = Normalize(y1, xbar1, N)
 
             # Prep for next time step
@@ -213,15 +228,20 @@ class IslandsEvo:
 
     def setup_epoch(self,cur_epoch,K,M,V,S):
         # rescale time to appropriate fraction of short timescale
+        m = self.m
+        N = self.N
+
         dt = self.dt * (K ** 0.5) * (M ** -0.5)
         self.dt_list.append(dt)
 
         # epoch time
+        if cur_epoch == 0:
+            epoch_timescale = 4*K**(-0.5)  # First epoch only for 4 * K**(0.5) * M
         if cur_epoch in self.long_epochs:
             epoch_timescale = self.epoch_timescale * self.long_factor
         else:
             epoch_timescale = self.epoch_timescale
-        epoch_time = epoch_timescale*(K**0.5)*M  # epoch_timescale*(long timescale)
+        epoch_time = epoch_timescale*(K**1)*M  # epoch_timescale*(long timescale)
         epoch_steps = int(epoch_time / dt)
         epoch_time = epoch_steps * dt
         self.epoch_time_list.append(epoch_time)  # save amount of time for current epoch
@@ -229,8 +249,10 @@ class IslandsEvo:
 
         u = 0
         normed = True
-        deriv = define_deriv_many_islands_selective_diffs(V, S, self.N, u, self.m, normed)
-        step_forward = step_rk4_many_islands
+        deriv = define_deriv_many_islands_selective_diffs(V, S, N, u, m, normed)
+        def step_forward(y0,xbar0):
+            y1, xbar1 = step_rk4_many_islands(y0,xbar0,m,dt,deriv)
+            return y1, xbar1
 
         return epoch_steps, sample_steps, step_forward
 
@@ -284,7 +306,7 @@ class IslandsEvo:
         K = len(self.current_species_idx)
         n0_new = np.zeros((D,K+mu))
         n0_new[:,:K] = n0
-        n0_new[:,K:] = self.invasion_freq
+        n0_new[:,K:] = self.invasion_freq_factor/K
         n0_new = n0_new/np.sum(n0_new,axis=1,keepdims=True)
         return n0_new
 
@@ -400,7 +422,7 @@ class IslandsEvo:
         return y1, xbar1
 
     def Extinction(self, y, xbar, thresh):
-
+        y[y<0] = 0
         local_ext_ind = xbar + np.log(y) < thresh
         y[local_ext_ind] = 0
 
@@ -450,14 +472,15 @@ class EvoSavedQuantities:
         self.lambda_mean_array = np.zeros((D))
         self.n_traj = np.zeros((K, sample_steps))
 
-    def save_sample(self,step,y0,xbar0):
+    def save_sample(self,step,y0,xbar0,cur_epoch):
 
         if step % self.sample_num == 0:
             ind = int(step // self.sample_num)
             self.count_short += 1
 
             n0 = np.exp(xbar0) * y0
-            self.n_traj[:, ind] = n0[0, :]
+            if cur_epoch in self.epochs_to_save_traj or -1 in self.epochs_to_save_traj:
+                self.n_traj[:, ind] = n0[0, :]
             self.n_mean_array += n0
             self.n2_mean_array += n0 ** 2
             self.lambda_mean_array += np.einsum('di,ij,dj->d', n0, self.V, n0)

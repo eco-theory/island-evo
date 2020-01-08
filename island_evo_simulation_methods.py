@@ -17,10 +17,11 @@ class IslandsEvoAdaptiveStep:
     # Long timescale is t = K**(1/2)*(temperature)
 
     def __init__(self, file_name, D, K, m, gamma, thresh, mu, seed, epoch_timescale, epoch_num,
-                 sample_num = 1, max_frac_change=0.75, invasion_freq_factor = 1, corr_mut=0, sig_S=0, n_init=None, V_init = None, S_init = None, epochs_to_save_traj = None,
+                 sample_num = 1, max_frac_change=0.75, invasion_freq_factor = 1, corr_mut=0, sig_S=0, n_init=None,
+                 V_init = None, S_init = None, epochs_to_save_traj = None,
                  long_epochs=None,long_factor=1,invasion_criteria_memory=100,invasion_eig_buffer=0.1):
 
-        # input file_name: name of save file
+        # input file_name: name of save fil
         # input D: number of islands
         # input K: number of types
         # input m: migration rate
@@ -58,6 +59,7 @@ class IslandsEvoAdaptiveStep:
         self.sample_num = sample_num
         self.max_frac_change = max_frac_change
         self.sim_start_time = time.time()
+        self.sim_start_process_time = time.process_time()
         self.corr_mut = corr_mut
         self.sig_S = sig_S
         if epochs_to_save_traj is None:
@@ -389,6 +391,7 @@ class IslandsEvoAdaptiveStep:
 
     def save_data(self,SavedQuants):
         self.sim_end_time = time.time()
+        self.sim_end_process_time = time.process_time()
         data = vars(self)
         data = SavedQuants.add_data_to_dict(data)
         np.savez(self.file_name, data = data)
@@ -443,6 +446,8 @@ class EvoSavedQuantitiesAdaptiveStep:
         self.invasion_success = []
         self.S_mean_ave_list = []
         self.S_mean_std_list = []
+        self.dt_mean_list = []
+        self.dt2_mean_list = []
 
         self.n_traj_dict = {}
         self.time_vec_dict = {}
@@ -454,6 +459,8 @@ class EvoSavedQuantitiesAdaptiveStep:
         self.n_mean_array = np.zeros((D, K))
         self.n2_mean_array = np.zeros((D, K))
         self.lambda_mean_array = np.zeros((D))
+        self.steps = 0
+        self.dt2_mean = 0
         self.n_traj = []
         self.time_vec = []
 
@@ -463,6 +470,8 @@ class EvoSavedQuantitiesAdaptiveStep:
         self.n_mean_array += dt * n0
         self.n2_mean_array += dt * n0 ** 2
         self.lambda_mean_array += dt * np.einsum('di,ij,dj->d', n0, self.V, n0)
+        self.steps += 1
+        self.dt2_mean += dt**2
 
         if cur_epoch in self.epochs_to_save_traj or -1 in self.epochs_to_save_traj:
             if self.count % self.sample_num == 0:
@@ -474,10 +483,12 @@ class EvoSavedQuantitiesAdaptiveStep:
         self.n_mean_array *= 1 / time
         self.n2_mean_array *= 1 / time
         self.lambda_mean_array *= 1 / time
+        self.dt_mean = time/self.steps
+        self.dt2_mean *= 1/self.steps
 
     def save_to_lists(self,cur_epoch,xbar,mu,species_idx):
         # input mu: number of mutants
-        # input species_idx: current species idx.
+        # input species_idx: current species idx
 
         n_mean_ave = np.mean(self.n_mean_array, axis=0)
         n2_mean_ave = np.mean(self.n2_mean_array, axis=0)
@@ -506,6 +517,9 @@ class EvoSavedQuantitiesAdaptiveStep:
         self.lambda_mean_std_list.append(lambda_mean_std)
         self.force_mean_std_list.append(force_mean_std)
         self.S_mean_std_list.append(S_mean_std)
+
+        self.dt_mean_list.append(self.dt_mean)
+        self.dt2_mean_list.append(self.dt2_mean)
 
         self.save_traj(cur_epoch)
 
@@ -585,6 +599,7 @@ class IslandsEvo:
         self.seed = seed
         self.sample_num = sample_num
         self.sim_start_time = time.time()
+        self.sim_start_process_time = time.process_time()
         self.corr_mut = corr_mut
         self.sig_S = sig_S
         if epochs_to_save_traj is None:
@@ -920,6 +935,7 @@ class IslandsEvo:
 
     def save_data(self,SavedQuants):
         self.sim_end_time = time.time()
+        self.sim_end_process_time = time.process_time()
         data = vars(self)
         data = SavedQuants.add_data_to_dict(data)
         np.savez(self.file_name, data = data)

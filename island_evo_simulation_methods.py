@@ -3,18 +3,534 @@ import math
 import scipy.signal
 import time
 import scipy.optimize as opt
-from multiprocessing import Pool
-import dill
 
-# def apply_pool_map(pool,func,args_list):
-#     # One function.
-#     # args: list of arguments
-#     dumps= [dill.dumps((func,args)) for args in args_list]
-#     return pool.map(run_dill_encoded,dumps)
-#
-# def run_dill_encoded(dump):
-#     func, args = dill.loads(dump)
-#     return func(*args)
+
+class IslandsEvoAdaptiveStep:
+    # Simulation with many islands with random invasion of new types.
+    # Mutations come in slowly, spaced out in epochs of O((K**(0.5))*M) in natural time units
+    # Corresponds to long time between mutations - bursts likely to happen sooner than new mutants coming in
+    # Pre-computes interaction matrix and works with appropriate slices.
+    # Saves data after each epoch: island-averages, extinction times, correlation function, eta over each epoch
+
+    # Frequency normalization
+    # Time normalization: simulation is in "natural normalization". Short timescale is dt = K**(1/2)*M**(-1/2).
+    # Long timescale is t = K**(1/2)*(temperature)
+
+    def __init__(self, file_name, D, K, m, gamma, thresh, mu, seed, epoch_timescale, epoch_num,
+                 sample_num = 1, max_frac_change=0.75, invasion_freq_factor = 1, corr_mut=0, sig_S=0, n_init=None, V_init = None, S_init = None, epochs_to_save_traj = None,
+                 long_epochs=None,long_factor=1,invasion_criteria_memory=100,invasion_eig_buffer=0.1):
+
+        # input file_name: name of save file
+        # input D: number of islands
+        # input K: number of types
+        # input m: migration rate
+        # input gamma: symmetry parameter
+        # input thresh: extinction threshold for log-frequency equal to log(1/N) for total population N.
+        # input invasion_freq_factor: new invasions come in at freq invasion_freq_factor/K
+        # input mu: number of types invading per epoch
+        # input seed: random seed
+        # input epoch_timescale: time for each epoch, units of M*K**0.5
+        # input epoch_num: number of epochs
+        # input sample_num: sampling period
+        # input max_frac_change: the maximum fractional change in frequency allowed across islands. Sets adaptive step size.
+        # input corr_mut: correlation of new types with previous ones
+        # input sig_S: standard dev. of selective differences
+        # input n_init: (D,K) array of frequencies to start from.
+        # input V_init: (K,K) array of interactions to start with.
+        # input S_init: (1,K) array of selective differences to start with.
+        # input epochs_to_save_traj: list of ints with index of epoch to save trajectories.
+        #       If -1 is included then the most current epoch is also saved.
+        # input long_epochs: which epochs to make longer, does not stop early.
+        # input long_factor: long epochs are longer by this factor.
+
+        self.file_name = file_name
+        self.D = D
+        self.K0 = K
+        self.m = m
+        self.gamma = gamma
+        self.N = 1  #frequency normalization
+        self.thresh = thresh
+        self.invasion_freq_factor = invasion_freq_factor
+        self.epoch_timescale = epoch_timescale
+        self.epoch_num = epoch_num
+        self.mu = mu
+        self.seed = seed
+        self.sample_num = sample_num
+        self.max_frac_change = max_frac_change
+        self.sim_start_time = time.time()
+        self.corr_mut = corr_mut
+        self.sig_S = sig_S
+        if epochs_to_save_traj is None:
+            self.epochs_to_save_traj = []
+        else:
+            self.epochs_to_save_traj = epochs_to_save_traj
+        self.n_init = n_init
+        self.V_init = V_init
+        self.S_init = S_init
+        if long_epochs is None:
+            self.long_epochs = []
+        else:
+            self.long_epochs = long_epochs
+        self.long_factor = long_factor
+        self.invasion_criteria_memory = invasion_criteria_memory
+        self.invasion_eig_buffer = invasion_eig_buffer
+
+        if n_init is not None:
+            self.K0 = n_init.shape[1]
+            self.D = n_init.shape[0]
+
+        self.EvoSim()
+
+    def EvoSim(self):
+        # Run evolutionary dynamics and save data
+
+        self.epoch_time_list = [] # list of total times for each epoch
+        self.n_init_list = [] # initial distribution of n
+        SavedQuants = EvoSavedQuantitiesAdaptiveStep(self.sample_num,self.epochs_to_save_traj)
+
+        self.surviving_bool_list = []
+        self.starting_species_idx_list = []
+        self.current_species_idx = np.arange(self.K0)
+        self.parent_idx_dict = {}
+        self.K_tot = self.K0  #current total number of species
+
+        self.invasion_eigs_list = []
+        self.invasion_rejects_list = []
+        self.invasion_success_list = []
+
+        np.random.seed(seed=self.seed)  # Set random seed
+        self.initialize_interactions_abundances()  #Sets V, S, and n0. Define V_dict and S_full
+
+        # evolution
+        for cur_epoch in range(self.epoch_num+1):
+            self.evo_step(cur_epoch, SavedQuants) # dynamics for one epoch. V, n0 are for non-extinct types
+            self.mut_step(SavedQuants)  # add new types
+            # Save data in case job terminates on cluster
+            self.save_data(SavedQuants)
+
+            num_types = self.n0.shape[1]
+            if num_types <= 10+self.mu:
+                break
+
+            print(cur_epoch)
+
+
+    def evo_step(self, cur_epoch, SavedQuants):
+        # Runs one epoch for the linear abundances. Returns nf (abundances for next timestep) and n_traj (sampled
+        # trajectories for a single island)
+        # n: (D,K) abundances
+        # xbar0: (1,K) log of island averaged abundances.
+
+        V = self.V
+        S = self.S
+        n0 = self.n0
+
+        K = np.shape(n0)[1]
+        D = self.D
+        m = self.m
+        N = self.N
+        thresh = self.thresh
+
+        M = self.define_M(K,m)
+
+        epoch_time, step_forward = self.setup_epoch(cur_epoch,K,M,V,S)
+
+        Normalize = self.Normalize
+        Extinction = self.Extinction
+        check_new_types_extinct = self.check_new_types_extinct
+
+        nbar = np.mean(n0, axis=0, keepdims=True)
+        xbar0 = np.log(nbar) # Assumes all types have nbar>0
+        y0 = n0 / nbar
+        n0 = y0 * np.exp(xbar0)
+        self.n_init_list.append(n0)
+        self.starting_species_idx_list.append(self.current_species_idx)  #Add current species indices to list.
+
+        # initialize for epoch
+        SavedQuants.initialize_epoch(D,K,V,S)
+
+        # dynamics
+        time = 0
+        while time < epoch_time:
+
+            # Step abundances forward
+            y1, xbar1, dt = step_forward(y0,xbar0)
+            time += dt
+            y1, xbar1 = Extinction(y1, xbar1, thresh)
+            y1, xbar1 = Normalize(y1, xbar1, N)
+
+            # Save values based on initial abundances.
+            SavedQuants.save_sample(dt, time, y0, xbar0, cur_epoch)
+
+            # Prep for next time step
+            y0 = y1
+            xbar0 = xbar1
+
+            # if all new types extinct, move to next epoch
+            # new_type_extinct_bool = check_new_types_extinct(xbar0,cur_epoch)
+            # if new_type_extinct_bool and cur_epoch not in self.long_epochs:
+            #     self.epoch_time_list[cur_epoch] = step*dt
+            #     break
+
+            ######### end epoch time steps
+
+        ####### Compute averages and save
+        SavedQuants.compute_averages(time)
+        SavedQuants.save_to_lists(cur_epoch,xbar0,self.mu,self.current_species_idx)
+
+        ####### Change number of surviving species.
+        self.subset_to_surviving_species(y0,xbar0,cur_epoch)
+
+
+    def initialize_interactions_abundances(self):
+        if self.V_init is None:
+            V = generate_interactions_with_diagonal(self.K0, self.gamma)
+        else:
+            V = self.V_init
+
+        #Add interactions to dictionary
+        V_dict = {}
+        for ii in range(self.K0):
+            for jj in range(self.K0):
+                V_dict[ii,jj] = V[ii,jj]
+        self.V_dict = V_dict
+
+        if self.n_init is None:
+            n0 = initialization_many_islands(self.D, self.K0, self.N, self.m, 'flat')
+        else:
+            n0 = self.n_init
+
+        if self.S_init is None:
+            S = self.sig_S*np.random.normal(size=(1,self.K0))
+        else:
+            S = self.S_init
+        self.S_full = S
+
+        self.n0 = n0
+        self.V = V
+        self.S = S
+
+    def define_M(self,K,m):
+        #Define log-migration parameter
+        M = np.log(1/(m*np.sqrt(K)))
+        return M
+
+    def setup_epoch(self,cur_epoch,K,M,V,S):
+        # rescale time to appropriate fraction of short timescale
+        m = self.m
+        N = self.N
+        max_frac_change = self.max_frac_change
+
+        # epoch time
+        if cur_epoch == 0:
+            epoch_timescale = 4*K**(-0.5)  # First epoch only for 4 * K**(0.5) * M
+        elif cur_epoch in self.long_epochs:
+            epoch_timescale = self.epoch_timescale * self.long_factor
+        else:
+            epoch_timescale = self.epoch_timescale
+        epoch_time = epoch_timescale*(K**1)*M  # epoch_timescale*(long timescale for marginal types (bias ~ 1/sqrt(K)) )
+        self.epoch_time_list.append(epoch_time)  # save amount of time for current epoch
+
+        u = 0
+        normed = True
+        deriv = define_deriv_many_islands_selective_diffs(V, S, N, u, m, normed)
+        def step_forward(y0,xbar0):
+            y1, xbar1, dt = adaptive_step(y0, xbar0, m, deriv, max_frac_change)
+            return y1, xbar1, dt
+
+        return epoch_time, step_forward
+
+    def subset_to_surviving_species(self,y0,xbar0,cur_epoch):
+        surviving_bool = xbar0[0, :] > -np.inf  # surviving species out of K1 current species.
+        self.surviving_bool_list.append(surviving_bool)
+        self.current_species_idx = self.current_species_idx[surviving_bool]
+
+        # only pass surviving types to next timestep
+        n0 = np.exp(xbar0) * y0
+        self.n0 = n0[:, surviving_bool]
+        self.V = self.V[np.ix_(surviving_bool, surviving_bool)]
+        self.S = self.S[:,surviving_bool]
+
+        if cur_epoch > 0:
+            invasion_success_bool = surviving_bool[-self.mu:]
+            self.invasion_success_list.extend(invasion_success_bool)
+
+    def mut_step(self,SavedQuants):
+        """
+        Generate new mutants and update list of alive types accordingly
+        :param n0: Current distribution of types (DxK matrix)
+        :return: V - current interaction matrix, n0_new - distribution of types with new mutants
+        """
+        V = self.V
+        S = self.S
+        n0 = self.n0
+
+        mu = self.mu
+        K = np.shape(V)[0]
+        V_new, S_new, parent_idx_list = self.gen_new_invasions(V,S,SavedQuants) #generated interactions correlated with parent
+
+        # set new invasion types
+        n0_new = self.next_epoch_abundances(mu, n0)
+
+        K_tot = self.K_tot
+        species_idx = np.append(self.current_species_idx,np.arange(K_tot,K_tot+mu))
+        self.current_species_idx = species_idx
+        for idx in range(mu):
+            self.parent_idx_dict[K_tot+idx] = parent_idx_list[idx]
+        self.K_tot = K_tot + mu
+
+        self.V = V_new
+        self.S = S_new
+        self.n0 = n0_new
+
+        self.store_new_interactions()
+
+    def next_epoch_abundances(self,mu,n0):
+        D = self.D
+        K = len(self.current_species_idx)
+        n0_new = np.zeros((D,K+mu))
+        n0_new[:,:K] = n0
+        n0_new[:,K:] = self.invasion_freq_factor/K
+        n0_new = n0_new/np.sum(n0_new,axis=1,keepdims=True)
+        return n0_new
+
+    def gen_new_invasions(self,V,S,SavedQuants):
+        mu = self.mu
+        K = np.shape(V)[0]
+        V_new = np.zeros((K+self.mu,K+self.mu))
+        V_new[0:K, 0:K] = V
+        S_new = np.zeros((1,K+self.mu))
+        S_new[0,0:K] = S
+
+        parent_idx_list = []
+        invasion_eigs = []
+        invasion_counts = 0
+        for idx in range(K,K+mu):
+
+            invade_bool = False
+            while not invade_bool:
+                par_idx = np.random.choice(K)
+                V_row, V_col, V_diag, s = self.gen_related_interactions(V_new,S,par_idx,idx)
+                invasion_eig = self.compute_invasion_eig(SavedQuants,V_row[:K],s)
+                invade_bool = self.invasion_criteria(invasion_eig,K)
+                invasion_counts += 1
+
+            invasion_eigs.append(invasion_eig)
+            parent_idx_list.append(int(self.current_species_idx[par_idx]))
+            V_new[idx, 0:idx] = V_row
+            V_new[0:idx, idx] = V_col
+            V_new[idx, idx] = V_diag
+            S_new[0, idx] = s
+
+        self.invasion_rejects_list.append(invasion_counts - mu)
+        self.invasion_eigs_list.extend(invasion_eigs)
+
+
+        return V_new, S_new, parent_idx_list
+
+    def gen_related_interactions(self,V_new,S_new,par_idx,idx):
+        # generate new types from random parents
+        corr_mut = self.corr_mut
+        cov_mat = [[1., self.gamma], [self.gamma, 1.]]
+        if self.gamma == -1:
+            z_vec = np.random.randn(idx)
+            V_row = corr_mut * V_new[par_idx, 0:idx] + np.sqrt(1 - corr_mut ** 2) * z_vec  # row
+            V_col = corr_mut * V_new[0:idx, par_idx] - np.sqrt(1 - corr_mut ** 2) * z_vec  # column
+            V_diag = 0  # diagonal
+        else:
+            z_mat = np.random.multivariate_normal([0, 0], cov=cov_mat, size=idx)  # 2 x (K+k) matrix of differences from parent
+            V_row = corr_mut * V_new[par_idx, 0:idx] + np.sqrt(1 - corr_mut ** 2) * z_mat[:, 0]  # row
+            V_col = corr_mut * V_new[0:idx, par_idx] + np.sqrt(1 - corr_mut ** 2) * z_mat[:, 1]  # column
+            V_diag = np.sqrt(1 + self.gamma) * np.random.normal()  # diagonal
+
+        s = corr_mut * S_new[0, par_idx] + np.sqrt(1 - corr_mut ** 2) * self.sig_S * np.random.normal()
+
+        return V_row, V_col, V_diag, s
+
+    def compute_invasion_eig(self,SavedQuants,row,s):
+        # Computes invasion eigenvalue based on previous epochs mean abundances and lambda
+        surviving_bool = self.surviving_bool_list[-1]
+        n_mean = SavedQuants.n_mean_ave_list[-1]
+        lambd = SavedQuants.lambda_mean_ave_list[-1]
+        S_mean = SavedQuants.S_mean_ave_list[-1]
+        invasion_eig = s + np.dot(row,n_mean[surviving_bool]) - S_mean - lambd
+        return invasion_eig
+
+    def invasion_criteria(self,invasion_eig,K):
+        # find the minimum invasion eigenvalue of the last x successful invasions.
+        # x is self.invasion_criteria_memory
+        # set invade_bool to True if invasion_eig is within invasion_eig_buffer of the minimum.
+
+        past_eigs = np.array(self.invasion_eigs_list)
+        success_bool = np.array(self.invasion_success_list)==True
+        success_eigs = past_eigs[success_bool]
+        if len(success_eigs) > self.invasion_criteria_memory:
+            min_eig = np.min(success_eigs[-self.invasion_criteria_memory:])
+            invade_bool = invasion_eig > min_eig - self.invasion_eig_buffer*1/np.sqrt(K)
+        else:
+            invade_bool = True
+        return invade_bool
+
+    def store_new_interactions(self):
+        V = self.V
+        S = self.S
+        mu = self.mu
+        species_idx = self.current_species_idx
+        K = V.shape[0]
+
+        self.S_full = np.append(self.S_full,S[:,-mu:])
+
+        V_dict = self.V_dict
+        for new_idx in range(K-mu,K):
+            for idx in range(K):
+                V_dict[species_idx[idx],species_idx[new_idx]] = V[idx,new_idx]
+                V_dict[species_idx[new_idx], species_idx[idx]] = V[new_idx,idx]
+        self.V_dict = V_dict
+
+    def save_data(self,SavedQuants):
+        self.sim_end_time = time.time()
+        data = vars(self)
+        data = SavedQuants.add_data_to_dict(data)
+        np.savez(self.file_name, data = data)
+
+    def Normalize(self, y, xbar, N):
+        n = np.exp(xbar) * y
+        Nhat = np.sum(n, axis=1, keepdims=True)
+        Yhat = np.mean(y * N / Nhat, axis=0, keepdims=True)
+
+        Yhat[Yhat == 0] = 1
+
+        y1 = (y * N / Nhat) / Yhat
+        xbar1 = xbar + np.log(Yhat)
+
+        return y1, xbar1
+
+    def Extinction(self, y, xbar, thresh):
+        y[y<0] = 0
+        local_ext_ind = xbar + np.log(y) < thresh
+        y[local_ext_ind] = 0
+
+        global_ext_ind = np.all(y == 0, axis=0)
+        xbar[:, global_ext_ind] = -np.inf
+        y[:, global_ext_ind] = 0
+
+        return y, xbar
+
+    def check_new_types_extinct(self,xbar,cur_epoch):
+        if cur_epoch>0:
+            new_type_extinct_bool = np.all(xbar[0,-self.mu:]==-np.inf)
+        else:
+            new_type_extinct_bool = False
+        return new_type_extinct_bool
+
+class EvoSavedQuantitiesAdaptiveStep:
+
+    def __init__(self,sample_num,epochs_to_save_traj):
+        self.sample_num = sample_num
+        self.epochs_to_save_traj = epochs_to_save_traj
+
+        # intialize lists to store values for each epoch
+        self.n_mean_ave_list = []  # <n> over epoch
+        self.n2_mean_ave_list = []  # <n^2> over epoch
+        self.lambda_mean_ave_list = []  # <\lambda> over epoch
+        self.n_mean_std_list = []
+        self.n2_mean_std_list = []
+        self.lambda_mean_std_list = []
+        self.force_mean_ave_list = []
+        self.force_mean_std_list = []
+        self.invasion_species_idx = []
+        self.invasion_eigs = []
+        self.invasion_success = []
+        self.S_mean_ave_list = []
+        self.S_mean_std_list = []
+
+        self.n_traj_dict = {}
+        self.time_vec_dict = {}
+
+    def initialize_epoch(self,D,K,V,S):
+        self.V = V
+        self.S = S
+        self.count = 0
+        self.n_mean_array = np.zeros((D, K))
+        self.n2_mean_array = np.zeros((D, K))
+        self.lambda_mean_array = np.zeros((D))
+        self.n_traj = []
+        self.time_vec = []
+
+    def save_sample(self,dt,time,y0,xbar0,cur_epoch):
+
+        n0 = np.exp(xbar0) * y0
+        self.n_mean_array += dt * n0
+        self.n2_mean_array += dt * n0 ** 2
+        self.lambda_mean_array += dt * np.einsum('di,ij,dj->d', n0, self.V, n0)
+
+        if cur_epoch in self.epochs_to_save_traj or -1 in self.epochs_to_save_traj:
+            if self.count % self.sample_num == 0:
+                self.count += 1
+                self.n_traj.append(n0[0, :])
+                self.time_vec.append(time)
+
+    def compute_averages(self,time):
+        self.n_mean_array *= 1 / time
+        self.n2_mean_array *= 1 / time
+        self.lambda_mean_array *= 1 / time
+
+    def save_to_lists(self,cur_epoch,xbar,mu,species_idx):
+        # input mu: number of mutants
+        # input species_idx: current species idx.
+
+        n_mean_ave = np.mean(self.n_mean_array, axis=0)
+        n2_mean_ave = np.mean(self.n2_mean_array, axis=0)
+        lambda_mean_ave = np.mean(self.lambda_mean_array, axis=0)
+
+        n_mean_std = np.std(self.n_mean_array, axis=0)
+        n2_mean_std = np.std(self.n2_mean_array, axis=0)
+        lambda_mean_std = np.std(self.lambda_mean_array, axis=0)
+
+        force_mean = np.einsum('ij,dj',self.V,self.n_mean_array)
+        force_mean_ave = np.mean(force_mean,axis=0)
+        force_mean_std = np.std(force_mean, axis=0)
+
+        S_mean = np.sum(self.S*self.n_mean_array,axis=1)
+        S_mean_ave = np.mean(S_mean)
+        S_mean_std = np.std(S_mean)
+
+        self.n_mean_ave_list.append(n_mean_ave)
+        self.n2_mean_ave_list.append(n2_mean_ave)
+        self.lambda_mean_ave_list.append(lambda_mean_ave)
+        self.force_mean_ave_list.append(force_mean_ave)
+        self.S_mean_ave_list.append(S_mean_ave)
+
+        self.n_mean_std_list.append(n_mean_std)
+        self.n2_mean_std_list.append(n2_mean_std)
+        self.lambda_mean_std_list.append(lambda_mean_std)
+        self.force_mean_std_list.append(force_mean_std)
+        self.S_mean_std_list.append(S_mean_std)
+
+        self.save_traj(cur_epoch)
+
+
+    def save_traj(self,cur_epoch):
+        if cur_epoch in self.epochs_to_save_traj:
+            self.n_traj_dict[cur_epoch] = np.array(self.n_traj).T
+            self.time_vec_dict[cur_epoch] = np.array(self.time_vec)
+
+        if -1 in self.epochs_to_save_traj:
+            self.n_traj_dict[-1] = np.array(self.n_traj).T
+            self.time_vec_dict[-1] = np.array(self.time_vec)
+
+
+    def add_data_to_dict(self,data):
+        var_dict = vars(self)
+        keys = list(var_dict.keys())
+        keys.remove('n_traj')
+        keys.remove('V')
+        keys.remove('S')
+
+        for key in keys:
+            data[key] = var_dict[key]
+
+        return data
 
 class IslandsEvo:
     # Simulation with many islands with random invasion of new types.
@@ -95,8 +611,6 @@ class IslandsEvo:
     def EvoSim(self):
         # Run evolutionary dynamics and save data
 
-        np.random.seed(seed=self.seed) #Set random seed
-
         self.dt_list = [] # list of dt for each epoch
         self.epoch_time_list = [] # list of total times for each epoch
         self.n_init_list = [] # initial distribution of n
@@ -112,6 +626,7 @@ class IslandsEvo:
         self.invasion_rejects_list = []
         self.invasion_success_list = []
 
+        np.random.seed(seed=self.seed)  # Set random seed
         self.initialize_interactions_abundances()  #Sets V, S, and n0. Define V_dict and S_full
 
         # evolution
@@ -2836,6 +3351,24 @@ def step_rk4_many_islands_bp(b0,p0,m_b,m_p,dt,deriv):
     
     return b1, p1
 
+
+def adaptive_step(y0, xbar0, m, deriv, max_frac_change):
+    # :input xbar0: (K,) vec of log island average
+    # :input y0: (K,) vec of abundance/island average
+    # :function deriv: gives derivative of y0.
+    # :param max_frac_change: maximum change in abundance across islands.
+    # :output y1: (K,) vec of new abundances (relative to island average exp(xbar0) )
+
+    ydot = deriv(y0, xbar0, m)
+    # freq_deriv = np.exp(xbar0)*ydot
+    # dt = max_frac_change / np.max(np.abs(freq_deriv))  #Choose dt so that the maxo of exp(xbar0)*ydot* dt equals max_frac_change
+    log_deriv = ydot[y0>0]/y0[y0>0]
+    dt_pos = max_frac_change/np.max(log_deriv)  #from max of positive log_deriv
+    dt_neg = -max_frac_change/np.min(log_deriv)
+    dt = np.min([dt_pos,dt_neg])
+    y1 = y0+ydot*dt
+
+    return y1, xbar0, dt
 
 
 def step_rk4_many_islands(y0,xbar0,m,dt,deriv):

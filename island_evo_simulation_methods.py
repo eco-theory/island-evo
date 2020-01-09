@@ -156,13 +156,13 @@ class IslandsEvoAdaptiveStep:
         while time < epoch_time:
 
             # Step abundances forward
-            y1, xbar1, dt = step_forward(y0,xbar0)
+            y1, xbar1, dt, stabilizing_term = step_forward(y0,xbar0)
             time += dt
             y1, xbar1 = Extinction(y1, xbar1, thresh)
             y1, xbar1 = Normalize(y1, xbar1, N)
 
             # Save values based on initial abundances.
-            SavedQuants.save_sample(dt, time, y0, xbar0, cur_epoch)
+            SavedQuants.save_sample(dt, time, y0, xbar0, stabilizing_term, cur_epoch)
 
             # Prep for next time step
             y0 = y1
@@ -237,8 +237,8 @@ class IslandsEvoAdaptiveStep:
         normed = True
         deriv = define_deriv_many_islands_selective_diffs(V, S, N, u, m, normed)
         def step_forward(y0,xbar0):
-            y1, xbar1, dt = adaptive_step(y0, xbar0, m, deriv, max_frac_change)
-            return y1, xbar1, dt
+            y1, xbar1, dt, stabilizing_term = adaptive_step(y0, xbar0, m, deriv, max_frac_change)
+            return y1, xbar1, dt, stabilizing_term
 
         return epoch_time, step_forward
 
@@ -460,17 +460,19 @@ class EvoSavedQuantitiesAdaptiveStep:
         self.n2_mean_array = np.zeros((D, K))
         self.lambda_mean_array = np.zeros((D))
         self.steps = 0
+        self.dt_mean = 0
         self.dt2_mean = 0
         self.n_traj = []
         self.time_vec = []
 
-    def save_sample(self,dt,time,y0,xbar0,cur_epoch):
+    def save_sample(self,dt,time,y0,xbar0,stabilizing_term,cur_epoch):
 
         n0 = np.exp(xbar0) * y0
         self.n_mean_array += dt * n0
         self.n2_mean_array += dt * n0 ** 2
-        self.lambda_mean_array += dt * np.einsum('di,ij,dj->d', n0, self.V, n0)
+        self.lambda_mean_array += dt * stabilizing_term.flatten()
         self.steps += 1
+        self.dt_mean += dt
         self.dt2_mean += dt**2
 
         if cur_epoch in self.epochs_to_save_traj or -1 in self.epochs_to_save_traj:
@@ -483,7 +485,7 @@ class EvoSavedQuantitiesAdaptiveStep:
         self.n_mean_array *= 1 / time
         self.n2_mean_array *= 1 / time
         self.lambda_mean_array *= 1 / time
-        self.dt_mean = time/self.steps
+        self.dt_mean *= 1/self.steps
         self.dt2_mean *= 1/self.steps
 
     def save_to_lists(self,cur_epoch,xbar,mu,species_idx):
@@ -3235,22 +3237,22 @@ def define_deriv_many_islands_selective_diffs(V, S, N, u, m, normed):
     def deriv(y, xbar, m):
         n = np.exp(xbar) * y
         D = np.shape(n)[0]
-        growth_rate = S - u * (n) + np.einsum('dj,ij', n, V)
+        growth_rate = S - u * (n) + np.einsum('ij,dj', V, n)
 
         if normed is True:
-            norm_factor = np.einsum('di,di->d', n, growth_rate) / N  # normalization factor
-            norm_factor = np.reshape(norm_factor, (D, 1))
+            stabilizing_term = np.einsum('di,di->d', n, growth_rate) / N  # normalization factor
+            stabilizing_term = np.reshape(stabilizing_term, (D, 1))
         else:
-            norm_factor = 0
+            stabilizing_term = 0
 
-        y_dot0 = y * (growth_rate - norm_factor)
+        y_dot0 = y * (growth_rate - stabilizing_term)
 
         if m == 0:
             y_dot = y_dot0
         else:
             y_dot = y_dot0 + m * (1 - y)
 
-        return y_dot
+        return y_dot, stabilizing_term
 
     return deriv
 
@@ -3375,7 +3377,7 @@ def adaptive_step(y0, xbar0, m, deriv, max_frac_change):
     # :param max_frac_change: maximum change in abundance across islands.
     # :output y1: (K,) vec of new abundances (relative to island average exp(xbar0) )
 
-    ydot = deriv(y0, xbar0, m)
+    ydot, stabilizing_term = deriv(y0, xbar0, m)
     # freq_deriv = np.exp(xbar0)*ydot
     # dt = max_frac_change / np.max(np.abs(freq_deriv))  #Choose dt so that the maxo of exp(xbar0)*ydot* dt equals max_frac_change
     log_deriv = ydot[y0>0]/y0[y0>0]
@@ -3384,7 +3386,7 @@ def adaptive_step(y0, xbar0, m, deriv, max_frac_change):
     dt = np.min([dt_pos,dt_neg])
     y1 = y0+ydot*dt
 
-    return y1, xbar0, dt
+    return y1, xbar0, dt, stabilizing_term
 
 
 def step_rk4_many_islands(y0,xbar0,m,dt,deriv):
@@ -3394,10 +3396,10 @@ def step_rk4_many_islands(y0,xbar0,m,dt,deriv):
     # :output x1: (K,) vec of log variables after one time step.
     
 
-    k1 = deriv(y0,xbar0,m)
-    k2 = deriv(y0+(dt/2)*k1,xbar0,m)
-    k3 = deriv(y0+(dt/2)*k2,xbar0,m)
-    k4 = deriv(y0+dt*k3,xbar0,m)
+    k1, _ = deriv(y0,xbar0,m)
+    k2, _ = deriv(y0+(dt/2)*k1,xbar0,m)
+    k3, _ = deriv(y0+(dt/2)*k2,xbar0,m)
+    k4, _ = deriv(y0+dt*k3,xbar0,m)
     
     y1 = y0 + (dt/6)*(k1 + 2*k2 + 2*k3+k4)
     return y1, xbar0

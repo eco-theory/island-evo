@@ -769,7 +769,7 @@ class IslandsEvo:
         # epoch time
         if cur_epoch == 0:
             epoch_timescale = 4*K**(-0.5)  # First epoch only for 4 * K**(0.5) * M
-        if cur_epoch in self.long_epochs:
+        elif cur_epoch in self.long_epochs:
             epoch_timescale = self.epoch_timescale * self.long_factor
         else:
             epoch_timescale = self.epoch_timescale

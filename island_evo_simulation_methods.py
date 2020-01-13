@@ -3,6 +3,7 @@ import math
 import scipy.signal
 import time
 import scipy.optimize as opt
+# from numba import njit,jit
 
 
 class IslandsEvoAdaptiveStep:
@@ -135,10 +136,11 @@ class IslandsEvoAdaptiveStep:
 
         M = self.define_M(K,m)
 
-        epoch_time, step_forward = self.setup_epoch(cur_epoch,K,M,V,S)
+        epoch_time = self.setup_epoch(cur_epoch,K,M,V,S)
 
         Normalize = self.Normalize
         Extinction = self.Extinction
+        step_forward = self.define_step_forward()
         check_new_types_extinct = self.check_new_types_extinct
 
         nbar = np.mean(n0, axis=0, keepdims=True)
@@ -233,14 +235,49 @@ class IslandsEvoAdaptiveStep:
         epoch_time = epoch_timescale*(K**1)*M  # epoch_timescale*(long timescale for marginal types (bias ~ 1/sqrt(K)) )
         self.epoch_time_list.append(epoch_time)  # save amount of time for current epoch
 
-        u = 0
-        normed = True
-        deriv = define_deriv_many_islands_selective_diffs(V, S, N, u, m, normed)
-        def step_forward(y0,xbar0):
-            y1, xbar1, dt, stabilizing_term = adaptive_step(y0, xbar0, m, deriv, max_frac_change)
-            return y1, xbar1, dt, stabilizing_term
+        # u = 0
+        # normed = True
+        # deriv = define_deriv_many_islands_selective_diffs(V, S, N, u, m, normed)
+        # def step_forward(y0,xbar0):
+        #     y1, xbar1, dt, stabilizing_term = adaptive_step(y0, xbar0, m, deriv, max_frac_change)
+        #     return y1, xbar1, dt, stabilizing_term
 
-        return epoch_time, step_forward
+        return epoch_time
+
+    def define_step_forward(self):
+        N = self.N
+        m = self.m
+        max_frac_change = self.max_frac_change
+        V = self.V
+        S = self.S
+
+        # @njit
+        def step_forward(y,xbar):
+
+            n = np.exp(xbar) * y
+            D = n.shape[0]
+            growth_rate = S + np.einsum('ij,dj', V, n)
+
+            stabilizing_term = np.einsum('di,di->d', n, growth_rate) / N  # normalization factor
+            stabilizing_term = np.reshape(stabilizing_term, (D, 1))
+
+            y_dot = y * (growth_rate - stabilizing_term)
+
+            if m == 0:
+                y_dot = y_dot
+            else:
+                y_dot = y_dot + m * (1 - y)
+
+            log_deriv = y_dot[y > 0] / y[y > 0]
+            dt_pos = max_frac_change / np.max(log_deriv)  # from max of positive log_deriv
+            dt_neg = -max_frac_change / np.min(log_deriv)
+            dt = np.min([dt_pos, dt_neg])
+            y1 = y + y_dot * dt
+
+            return y1, xbar, dt, stabilizing_term
+
+        return step_forward
+
 
     def subset_to_surviving_species(self,y0,xbar0,cur_epoch):
         surviving_bool = xbar0[0, :] > -np.inf  # surviving species out of K1 current species.
@@ -3368,7 +3405,6 @@ def step_rk4_many_islands_bp(b0,p0,m_b,m_p,dt,deriv):
     p1 = p0 + (dt/6)*(k1_p + 2*k2_p + 2*k3_p+k4_p)
     
     return b1, p1
-
 
 def adaptive_step(y0, xbar0, m, deriv, max_frac_change):
     # :input xbar0: (K,) vec of log island average

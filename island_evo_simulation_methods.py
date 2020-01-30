@@ -21,7 +21,7 @@ class IslandsEvoAdaptiveStep:
     def __init__(self, file_name, D, K, m, gamma, thresh, mu, seed, epoch_timescale, epoch_num=np.inf, 
                  corr_mut=0, sig_S=0, max_frac_change=0.75, invasion_freq_factor = 1,
                  invasion_criteria_memory=100, invasion_eig_buffer=0.1, new_save_epoch_num = 50, 
-                 long_epochs=None,long_factor=1,
+                 long_epochs=None,long_factor=5,
                  epochs_to_save_traj = None, sample_num = 1, save_interactions = False,
                  n_init=None, V_init = None, S_init = None, invasion_eigs_init = None, 
                  init_species_idx = None, new_species_idx = None, start_epoch_num = 0):
@@ -88,6 +88,7 @@ class IslandsEvoAdaptiveStep:
             self.epochs_to_save_traj = []
         else:
             self.epochs_to_save_traj = epochs_to_save_traj
+        self.save_interactions = save_interactions
         self.n_init = n_init
         self.V_init = V_init
         self.S_init = S_init
@@ -125,7 +126,7 @@ class IslandsEvoAdaptiveStep:
         # Creates separate save file with parameters.
         file_name = self.file_name+'.params'
         data = vars(self)
-        np.savez(file_name,**data)
+        np.savez(file_name,data = data)
 
     def evo_sim(self):
         # Run evolutionary dynamics and saves data
@@ -181,7 +182,7 @@ class IslandsEvoAdaptiveStep:
 
          # Define idx for next species, if not already defined
         if self.new_species_idx is None:
-            self.new_species_idx = max(self.current_species_idx)+1 
+            self.new_species_idx = max(self.current_species_idx)+1
 
 
     def evo_step(self, cur_epoch):
@@ -289,7 +290,7 @@ class IslandsEvoAdaptiveStep:
             SavedQuants = EvoSavedQuantitiesAdaptiveStep(file_name, self.sim_start_time,
                                                          self.sim_start_process_time, self.sample_num,
                                                          self.epochs_to_save_traj,self.save_interactions)
-            SavedQuants.initialize_dicts(self.V, self.S, self.current_species_idx)  # store interactions and selective diffs in dictionaries
+            SavedQuants.initialize_dicts(self.V, self.current_species_idx)  # store interactions and selective diffs in dictionaries
             self.SavedQuants = SavedQuants
 
     def define_step_forward(self):
@@ -370,7 +371,7 @@ class IslandsEvoAdaptiveStep:
         self.S = S_new
         self.n0 = n0_new
 
-        SavedQuants.store_new_interactions(V_new,S_new,mu,species_idx,parent_idx_list)
+        SavedQuants.store_new_interactions(V_new,mu,species_idx,parent_idx_list)
 
     def gen_new_invasions(self,V,S,SavedQuants):
         #Generates possible invasions. Estimates invasion eig. 
@@ -682,14 +683,14 @@ class EvoSavedQuantitiesAdaptiveStep:
         data.pop('V', None)
         data.pop('S', None)
 
-        np.savez(self.file_name,**data)
+        np.savez(self.file_name,data = data)
 
 def extend_adaptive_step_sim(file_prefix,epochs = None):
     # Takes save file generated from IslandEvoAdaptiveStep and runs additional epochs
     # input file_prefix: prefix of save file to start from
     # input epochs: number of epochs to run. If None, will run until cluster terminates job.
     with np.load(file_prefix+'.params.npz') as sim_data:
-        params_dict = sim_data['data']
+        params_dict = sim_data['data'].item()
 
     #remove non-parameter keys
     params_dict['K'] = params_dict['K0']
@@ -707,7 +708,7 @@ def extend_adaptive_step_sim(file_prefix,epochs = None):
             last_ind = ind-1
             break
     file = file_prefix + '.{}.npz'.format(last_ind)
-    data = np.load(file)['data']
+    data = np.load(file)['data'].item()
     species_idx = data['starting_species_idx_list'][-1]
     surviving_bool = data['surviving_bool_list'][-1]
     starting_species_idx = species_idx[surviving_bool]
@@ -718,8 +719,9 @@ def extend_adaptive_step_sim(file_prefix,epochs = None):
     params_dict['start_epoch_num'] = epoch_num
 
     K = len(starting_species_idx)
-    V_init = data['V_end']
-    S_init = data['S_list'][-1]
+    V = data['V_end'][surviving_bool,:][:,surviving_bool]
+    params_dict['V_init'] = V
+    params_dict['S_init'] = data['S_list'][-1][:,surviving_bool]
 
     new_species_idx = max(starting_species_idx)+1
     params_dict['new_species_idx'] = new_species_idx
@@ -730,7 +732,7 @@ def extend_adaptive_step_sim(file_prefix,epochs = None):
     while len(invasion_success_eigs)<params_dict['invasion_criteria_memory']:
         file = file_prefix + '.{}.npz'.format(last_ind)
         with np.load(file) as sim_data:
-            data = sim_data['data']
+            data = sim_data['data'].item()
             invasion_eigs = np.array(data['invasion_eigs_list']).flatten()
             success_bool = np.array(data['invasion_success_list']).flatten()
             invasion_success_eigs.insert(0,invasion_eigs[success_bool])
@@ -743,7 +745,7 @@ def extend_adaptive_step_sim(file_prefix,epochs = None):
         params_dict['epoch_num'] = np.inf
     else:
         params_dict['epoch_num'] = int(epochs)
-    params_dict['file_name'] = file_prefix+'_ext'
+    params_dict['file_name'] = file_prefix
     Evo = IslandsEvoAdaptiveStep(**params_dict)
     Evo.extend_simulation()
 
@@ -753,7 +755,7 @@ def combine_save_files(file_prefix):
 
     file_name = file_prefix + '.params.npz'
     with np.load(file_name) as sim_data:
-        data = sim_data['data']
+        data = sim_data['data'].item()
         data_dict = data
 
     file_exists = True
@@ -764,7 +766,7 @@ def combine_save_files(file_prefix):
             break
 
         with np.load(file_name) as sim_data:
-            data = sim_data['data']
+            data = sim_data['data'].item()
 
         if ind == 0:
             for key in data.keys():
@@ -780,10 +782,10 @@ def combine_save_files(file_prefix):
                     data_dict[key].update(value)
         ind += 1
 
-    data_dict.pop('V_dict')
-    data_dict.pop('n_init_list')
+    data_dict.pop('V_dict',None)
+    data_dict.pop('n_init_list',None)
     file_name = file_prefix
-    np.savez(file_name, **data_dict)
+    np.savez(file_name, data = data_dict)
 
 
 #OLDER CODE FOR BACTERIA PHAGE simulations
@@ -950,7 +952,7 @@ class bp_evo:
             if i % 10 == 0:  #save data every 10 epochs
                 class_dict = vars(self)
 
-                np.savez(self.file_name, **class_dict)
+                np.savez(self.file_name, data = class_dict)
 
         # save last trajectory for debugging purposes
         self.b_traj_f = b_traj_f
@@ -959,7 +961,7 @@ class bp_evo:
         # save data
         class_dict = vars(self)
 
-        np.savez(self.file_name, **class_dict)
+        np.savez(self.file_name, data = class_dict)
         
 
     def evo_step(self,G,H,b0,p0,cur_epoch):

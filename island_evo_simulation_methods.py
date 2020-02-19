@@ -20,7 +20,9 @@ class IslandsEvoAdaptiveStep:
 
     def __init__(self, file_name, D, K, m, gamma, thresh, mu, seed, epoch_timescale, epoch_num=np.inf, 
                  corr_mut=0, sig_S=0, max_frac_change=0.75, invasion_freq_factor = 1,
-                 invasion_criteria_memory=100, invasion_eig_buffer=0.1, new_save_epoch_num = 50, 
+                 first_epoch_timescale=4,
+                 invasion_criteria_memory=100, invasion_eig_buffer=0.2, new_save_epoch_num = 50,
+                 S_distribution='gaussian', S_tail_power = 1,
                  long_epochs=None,long_factor=5,
                  epochs_to_save_traj = None, sample_num = 1, save_interactions = False,
                  n_init=None, V_init = None, S_init = None, invasion_eigs_init = None, 
@@ -41,10 +43,16 @@ class IslandsEvoAdaptiveStep:
             # input sig_S: standard dev. of selective differences
             # input max_frac_change: the maximum fractional change in frequency allowed across islands. Sets adaptive step size.
             # input invasion_freq_factor: new invasions come in at freq invasion_freq_factor/K
+            # input first_epoch_timescale: timescale for first epoch, units of sqrt(K)*M
 
         # Parameters for invading new types
             # input invasion_criteria_memory: number of most recent successful invasions kept
             # input invasion_eig_buffer: sets threshold below the minimum successful invasion eigenvalues for new invasions.
+
+        # Parameters for distribution of new types
+            # input S_distribution:
+                # 'gaussian' for gaussian distribution.
+                # 'exponential_tail' for tail of the form exp(-(x/sig_S)**p) where p = S_tail_power. Distribution is for S>0.
 
         # Debugging with long epochs, used to see if additional strains go extinct when epochs are longer.
             # input long_epochs: list of epochs that are long
@@ -76,6 +84,7 @@ class IslandsEvoAdaptiveStep:
         self.N = 1  #frequency normalization
         self.thresh = thresh
         self.invasion_freq_factor = invasion_freq_factor
+        self.first_epoch_timescale = first_epoch_timescale
         self.epoch_timescale = epoch_timescale
         self.epoch_num = epoch_num
         self.mu = mu
@@ -84,6 +93,8 @@ class IslandsEvoAdaptiveStep:
         self.max_frac_change = max_frac_change
         self.corr_mut = corr_mut
         self.sig_S = sig_S
+        self.S_distribution = S_distribution
+        self.S_tail_power = S_tail_power
         if epochs_to_save_traj is None:
             self.epochs_to_save_traj = []
         else:
@@ -139,7 +150,7 @@ class IslandsEvoAdaptiveStep:
         while cur_epoch < self.start_epoch_num + self.epoch_num:
             self.setup_save_object(cur_epoch) #creates save object. Uses new file_name after new_file_epoch_num
             self.evo_step(cur_epoch) # dynamics for one epoch. V, n0 are for non-extinct types
-            self.mut_step()  # add new types
+            self.mut_step(cur_epoch)  # add new types
 
             self.SavedQuants.save_data() # Save data in case job terminates on cluster
 
@@ -164,7 +175,8 @@ class IslandsEvoAdaptiveStep:
 
         # initial selective differences
         if self.S_init is None:
-            self.S = self.sig_S*np.random.normal(size=(1,self.K0))
+            S = self.draw_S_distribution(self.K0)
+            self.S = np.reshape(S,(1,self.K0))
         else:
             self.S = self.S_init
 
@@ -184,6 +196,34 @@ class IslandsEvoAdaptiveStep:
         if self.new_species_idx is None:
             self.new_species_idx = max(self.current_species_idx)+1
 
+    def draw_S_distribution(self,num):
+        # Draw from distribution of S
+        # input num: number of draws to make
+        # return S: (num,) vec of S values.
+
+        if self.S_distribution is 'gaussian':
+            S = self.sig_S * np.random.normal(size=(num))
+
+        elif self.S_distribution is 'exponential_tail':
+            p = self.S_tail_power
+
+            min_prob = 1e-12
+            s_max = (np.log(1/min_prob))**(1./p)
+            if s_max > 8:
+                ds = s_max/3e4
+            else:
+                s_max = 8
+                ds = 0.0003
+
+            s_vec = np.arange(0, s_max, ds) #units of sig_S
+            prob_density = np.exp(-s_vec**p)*ds
+            prob_density *= 1/np.sum(prob_density)
+            cum_prob = np.cumsum(prob_density)
+            rand_nums = np.random.rand(num)
+            indices = np.digitize(rand_nums, cum_prob)
+            S = self.sig_S * s_vec[indices]
+
+        return S
 
     def evo_step(self, cur_epoch):
         # Runs dynamics for one epoch. 
@@ -272,7 +312,7 @@ class IslandsEvoAdaptiveStep:
 
         # epoch time
         if cur_epoch == 0:
-            epoch_timescale = 4*K**(-0.5)  # First epoch only for 4 * K**(0.5) * M
+            epoch_timescale = self.first_epoch_timescale*K**(-0.5)  # First epoch only for 4 * K**(0.5) * M
         elif cur_epoch in self.long_epochs:
             epoch_timescale = self.epoch_timescale * self.long_factor
         else:
@@ -324,9 +364,13 @@ class IslandsEvoAdaptiveStep:
                 y_dot = y_dot + m * (1 - y)
 
             log_deriv = y_dot[y > 0] / y[y > 0]
-            dt_pos = max_frac_change / np.max(log_deriv)  # from max of positive log_deriv
-            dt_neg = -max_frac_change / np.min(log_deriv)
-            dt = np.min([dt_pos, dt_neg])
+            if np.max(log_deriv) ==0:
+                print('fixed pt reached')
+                dt = 1
+            else:
+                dt_pos = max_frac_change / np.max(log_deriv)  # from max of positive log_deriv
+                dt_neg = -max_frac_change / np.min(log_deriv)
+                dt = np.min([dt_pos, dt_neg])
             y1 = y + y_dot * dt
 
             return y1, xbar, dt, stabilizing_term
@@ -347,7 +391,7 @@ class IslandsEvoAdaptiveStep:
 
         return surviving_bool
 
-    def mut_step(self):
+    def mut_step(self,cur_epoch):
         #Generate new mutants. Updates list of current species indices.
 
         V = self.V
@@ -357,7 +401,7 @@ class IslandsEvoAdaptiveStep:
 
         mu = self.mu
         K = np.shape(V)[0]
-        V_new, S_new, parent_idx_list = self.gen_new_invasions(V,S,SavedQuants) #generated interactions correlated with parent
+        V_new, S_new, parent_idx_list = self.gen_new_invasions(V,S,SavedQuants,cur_epoch) #generated interactions correlated with parent
 
         # set new invasion types
         n0_new = self.next_epoch_abundances(mu, n0)
@@ -373,7 +417,7 @@ class IslandsEvoAdaptiveStep:
 
         SavedQuants.store_new_interactions(V_new,mu,species_idx,parent_idx_list)
 
-    def gen_new_invasions(self,V,S,SavedQuants):
+    def gen_new_invasions(self,V,S,SavedQuants,cur_epoch):
         #Generates possible invasions. Estimates invasion eig. 
         # And evaluates whether new mutants passes invasion criteria.
         # If it passes, its interactions and selected differences are added to V and S
@@ -396,7 +440,7 @@ class IslandsEvoAdaptiveStep:
                 par_idx = np.random.choice(K)
                 V_row, V_col, V_diag, s = self.gen_related_interactions(V_new,S,par_idx,idx)
                 invasion_eig = self.compute_invasion_eig(SavedQuants,V_row[:K],s)
-                invade_bool = self.invasion_criteria(invasion_eig,K)
+                invade_bool = self.invasion_criteria(invasion_eig,K,cur_epoch)
                 invasion_counts += 1
 
             invasion_eigs.append(invasion_eig)
@@ -427,7 +471,12 @@ class IslandsEvoAdaptiveStep:
             V_col = corr_mut * V_new[0:idx, par_idx] + np.sqrt(1 - corr_mut ** 2) * z_mat[:, 1]  # column
             V_diag = np.sqrt(1 + self.gamma) * np.random.normal()  # diagonal
 
-        s = corr_mut * S_new[0, par_idx] + np.sqrt(1 - corr_mut ** 2) * self.sig_S * np.random.normal()
+        if self.S_distribution is 'gaussian':
+            s = corr_mut * S_new[0, par_idx] + np.sqrt(1 - corr_mut ** 2) * self.draw_S_distribution(1)
+        elif self.S_distribution is 'exponential_tail':
+            #TODO implement correlated mutation for different S distributions.
+            # Need to use random walk process with correct equilibrium distribution.
+            s = self.draw_S_distribution(1)
 
         return V_row, V_col, V_diag, s
 
@@ -440,16 +489,23 @@ class IslandsEvoAdaptiveStep:
         invasion_eig = s + np.dot(row,n_mean[surviving_bool]) - stabilizing_term
         return invasion_eig
 
-    def invasion_criteria(self,invasion_eig,K):
+    def invasion_criteria(self,invasion_eig,K,cur_epoch):
         # find the minimum invasion eigenvalue of the last x successful invasions
         # Where x is self.invasion_criteria_memory
         # Return invade_bool as True if invasion_eig is within invasion_eig_buffer of the minimum.
 
         success_eigs = np.array(self.invasion_success_eigs)
         if len(success_eigs) >= self.invasion_criteria_memory:
+
+            # Twice per invasion_criteria_memory invade types with eig below the minimum threshold to see.
             min_eig = np.min(success_eigs)
-            eig_scale = np.sqrt(1/K + self.sig_S**2)  #estimate of eig standard dev
-            invade_bool = invasion_eig > min_eig - self.invasion_eig_buffer*eig_scale
+            eig_scale = np.sqrt(1 / K + self.sig_S ** 2)  # estimate of eig standard dev
+
+            half_memory = int(self.invasion_criteria_memory/(2*self.mu))
+            if cur_epoch % half_memory == 0:
+                invade_bool = invasion_eig > min_eig-5*self.invasion_eig_buffer*eig_scale
+            else:
+                invade_bool = invasion_eig > min_eig - self.invasion_eig_buffer*eig_scale
         else:
             invade_bool = True
         return invade_bool

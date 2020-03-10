@@ -188,7 +188,7 @@ class IslandsEvoAdaptiveStep:
 
         # list of successful invasion eigenvalues
         if self.invasion_eigs_init is not None:
-            self.invasion_success_eigs = self.invasion_eigs_init
+            self.invasion_success_eigs = list(self.invasion_eigs_init)
         else:
             self.invasion_success_eigs = []
 
@@ -201,10 +201,10 @@ class IslandsEvoAdaptiveStep:
         # input num: number of draws to make
         # return S: (num,) vec of S values.
 
-        if self.S_distribution is 'gaussian':
+        if self.S_distribution == 'gaussian':
             S = self.sig_S * np.random.normal(size=(num))
 
-        elif self.S_distribution is 'exponential_tail':
+        elif self.S_distribution == 'exponential_tail':
             p = self.S_tail_power
 
             min_prob = 1e-12
@@ -437,7 +437,7 @@ class IslandsEvoAdaptiveStep:
 
             invade_bool = False
             while not invade_bool:
-                par_idx = np.random.choice(K)
+                par_idx = self.sample_parent_idx()
                 V_row, V_col, V_diag, s = self.gen_related_interactions(V_new,S,par_idx,idx)
                 invasion_eig = self.compute_invasion_eig(SavedQuants,V_row[:K],s)
                 invade_bool = self.invasion_criteria(invasion_eig,K,cur_epoch)
@@ -455,6 +455,15 @@ class IslandsEvoAdaptiveStep:
 
         return V_new, S_new, parent_idx_list
 
+    def sample_parent_idx(self):
+        # Get idx of parent for new mutant
+        # Chooses strains weighted by their mean abundance across islands.
+
+        nbar = np.mean(self.n0,axis=0)  #n0 is (D,K) dim array of abundances
+        nbar = nbar/np.sum(nbar)
+        parent_idx = np.random.choice(len(nbar),p=nbar)
+        return parent_idx
+
     def gen_related_interactions(self,V_new,S_new,par_idx,idx):
         # Generates new types from random parents with interaction matrix correlated with parent.
 
@@ -469,11 +478,11 @@ class IslandsEvoAdaptiveStep:
             z_mat = np.random.multivariate_normal([0, 0], cov=cov_mat, size=idx)  # 2 x (K+k) matrix of differences from parent
             V_row = corr_mut * V_new[par_idx, 0:idx] + np.sqrt(1 - corr_mut ** 2) * z_mat[:, 0]  # row
             V_col = corr_mut * V_new[0:idx, par_idx] + np.sqrt(1 - corr_mut ** 2) * z_mat[:, 1]  # column
-            V_diag = np.sqrt(1 + self.gamma) * np.random.normal()  # diagonal
-
-        if self.S_distribution is 'gaussian':
+            V_diag = corr_mut* V_new[par_idx,par_idx] + np.sqrt(1 - corr_mut ** 2) * np.sqrt(1 + self.gamma) * np.random.normal()  # diagonal
+            
+        if self.S_distribution == 'gaussian':
             s = corr_mut * S_new[0, par_idx] + np.sqrt(1 - corr_mut ** 2) * self.draw_S_distribution(1)
-        elif self.S_distribution is 'exponential_tail':
+        elif self.S_distribution == 'exponential_tail':
             #TODO implement correlated mutation for different S distributions.
             # Need to use random walk process with correct equilibrium distribution.
             s = self.draw_S_distribution(1)
@@ -789,8 +798,8 @@ def extend_adaptive_step_sim(file_prefix,epochs = None):
         file = file_prefix + '.{}.npz'.format(last_ind)
         with np.load(file) as sim_data:
             data = sim_data['data'].item()
-            invasion_eigs = np.array(data['invasion_eigs_list']).flatten()
-            success_bool = np.array(data['invasion_success_list']).flatten()
+            invasion_eigs = np.concatenate(data['invasion_eigs_list'],axis=None)
+            success_bool = np.concatenate(data['invasion_success_list'],axis=None).astype('bool')
             invasion_success_eigs.insert(0,invasion_eigs[success_bool])
         ind -= 1
         if ind<0:

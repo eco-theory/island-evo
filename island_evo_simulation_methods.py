@@ -18,7 +18,7 @@ class IslandsEvoAdaptiveStep:
     # Normalization: abundances are normalized to be frequencies and interactions/selective differences are assumed to be order one.
     # Timescales: each epoch lasts for a time epoch_timescale*K*M, corresponding to the long timescale for marginal types with biases of order 1/K.
 
-    def __init__(self, file_name, D, K, m, gamma, thresh, mu, seed, epoch_timescale, epoch_num=np.inf, 
+    def __init__(self, file_name, D, K, m, gamma, mu, seed, epoch_timescale, ext_thresh_factor = 4, epoch_num=np.inf,
                  corr_mut=0, sig_S=0, max_frac_change=0.75, invasion_freq_factor = 1,
                  first_epoch_timescale=4,
                  invasion_criteria_memory=100, invasion_eig_buffer=0.2, new_save_epoch_num = 50,
@@ -34,10 +34,10 @@ class IslandsEvoAdaptiveStep:
             # input K: initial number of strains
             # input m: migration rate
             # input gamma: symmetry parameter
-            # input thresh: extinction threshold for log-frequency equal to log(1/N) for total population N.
             # input mu: number of strains invading per epoch
             # input seed: random seed
             # input epoch_timescale: time for each epoch, units of K*M
+            # input ext_thresh_factor: extinction threshold is at log(freq) = - ext_thresh_factor*M where M = log(1/m)
             # input epoch_num: number of epoch. Default of np.inf runs until cluster job times out.
             # input corr_mut: correlation of new types with previous ones
             # input sig_S: standard dev. of selective differences
@@ -82,7 +82,8 @@ class IslandsEvoAdaptiveStep:
         self.m = m
         self.gamma = gamma
         self.N = 1  #frequency normalization
-        self.thresh = thresh
+        self.ext_thresh_factor = ext_thresh_factor
+        self.thresh = - ext_thresh_factor*np.log(1/m)
         self.invasion_freq_factor = invasion_freq_factor
         self.first_epoch_timescale = first_epoch_timescale
         self.epoch_timescale = epoch_timescale
@@ -479,7 +480,7 @@ class IslandsEvoAdaptiveStep:
             V_row = corr_mut * V_new[par_idx, 0:idx] + np.sqrt(1 - corr_mut ** 2) * z_mat[:, 0]  # row
             V_col = corr_mut * V_new[0:idx, par_idx] + np.sqrt(1 - corr_mut ** 2) * z_mat[:, 1]  # column
             V_diag = corr_mut* V_new[par_idx,par_idx] + np.sqrt(1 - corr_mut ** 2) * np.sqrt(1 + self.gamma) * np.random.normal()  # diagonal
-            
+
         if self.S_distribution == 'gaussian':
             s = corr_mut * S_new[0, par_idx] + np.sqrt(1 - corr_mut ** 2) * self.draw_S_distribution(1)
         elif self.S_distribution == 'exponential_tail':

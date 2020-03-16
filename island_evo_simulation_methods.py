@@ -45,6 +45,7 @@ class IslandsEvoAdaptiveStep:
             # input max_frac_change: the maximum fractional change in frequency allowed across islands. Sets adaptive step size.
             # input invasion_freq_factor: new invasions come in at freq invasion_freq_factor/K
             # input first_epoch_timescale: timescale for first epoch, units of sqrt(K)*M
+            # input end_condition: sets kind of ending condition. 
 
         # Parameters for invading new types
             # input invasion_criteria_memory: number of most recent successful invasions kept

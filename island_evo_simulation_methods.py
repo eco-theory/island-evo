@@ -26,7 +26,8 @@ class IslandsEvoAdaptiveStep:
                  long_epochs=None,long_factor=5,
                  epochs_to_save_traj = None, sample_num = 1, save_interactions = False,
                  n_init=None, V_init = None, S_init = None, invasion_eigs_init = None, 
-                 init_species_idx = None, new_species_idx = None, start_epoch_num = 0):
+                 init_species_idx = None, new_species_idx = None, start_epoch_num = 0,
+                 end_condition = 'long_run'):
         
         # General simulation parameters 
             # input file_name: prefix for save files.
@@ -156,7 +157,7 @@ class IslandsEvoAdaptiveStep:
             self.SavedQuants.save_data() # Save data in case job terminates on cluster
 
             num_types = self.n0.shape[1]
-            if num_types <= 10+self.mu:
+            if self.ending_condition(num_types):
                 break
             print(cur_epoch)
             cur_epoch += 1
@@ -587,6 +588,19 @@ class IslandsEvoAdaptiveStep:
         else:
             new_type_extinct_bool = False
         return new_type_extinct_bool
+
+    def ending_condition(self,num_types):
+        # Returns True if simulation will end
+        if self.end_condition == 'long_run':
+            if num_types <= 10:
+                return True
+            else:
+                return False
+        elif self.end_condition == 'nucleation':
+            if num_types > 400:
+                return True
+            else:
+                return False
 
 class EvoSavedQuantitiesAdaptiveStep:
     # Object that saves quantities.

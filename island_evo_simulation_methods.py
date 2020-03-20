@@ -45,7 +45,7 @@ class IslandsEvoAdaptiveStep:
             # input max_frac_change: the maximum fractional change in frequency allowed across islands. Sets adaptive step size.
             # input invasion_freq_factor: new invasions come in at freq invasion_freq_factor/K
             # input first_epoch_timescale: timescale for first epoch, units of sqrt(K)*M
-            # input end_condition: sets kind of ending condition. 
+            # input end_condition: sets kind of ending condition.
 
         # Parameters for invading new types
             # input invasion_criteria_memory: number of most recent successful invasions kept
@@ -118,6 +118,7 @@ class IslandsEvoAdaptiveStep:
         self.invasion_eig_buffer = invasion_eig_buffer
         self.new_save_epoch_num = new_save_epoch_num
         self.start_epoch_num = start_epoch_num
+        self.end_condition = end_condition
 
         if V_init is not None:
             self.K0 = V_init.shape[0]
@@ -160,7 +161,7 @@ class IslandsEvoAdaptiveStep:
             num_types = self.n0.shape[1]
             if self.ending_condition(num_types):
                 break
-            print(cur_epoch)
+            print([cur_epoch, num_types])
             cur_epoch += 1
 
     def initializations(self):
@@ -367,13 +368,17 @@ class IslandsEvoAdaptiveStep:
                 y_dot = y_dot + m * (1 - y)
 
             log_deriv = y_dot[y > 0] / y[y > 0]
-            if np.max(log_deriv) ==0:
-                print('fixed pt reached')
+            if np.max(log_deriv) <= 0:
+                # print('fixed pt reached')
                 dt = 1
             else:
                 dt_pos = max_frac_change / np.max(log_deriv)  # from max of positive log_deriv
                 dt_neg = -max_frac_change / np.min(log_deriv)
                 dt = np.min([dt_pos, dt_neg])
+
+            if dt > 5: dt = 5
+            if dt < 0: dt = 0.1
+
             y1 = y + y_dot * dt
 
             return y1, xbar, dt, stabilizing_term

@@ -178,8 +178,9 @@ class IslandsEvoAdaptiveStep:
             self.n0 = self.n_init
 
         # initial selective differences
+        self.S_generator = S_generator(self.S_distribution,self.S_tail_power,self.sig_S,self.corr_mut)
         if self.S_init is None:
-            S = self.draw_S_distribution(self.K0)
+            S = self.S_generator.draw_from_distribution(self.K0)
             self.S = np.reshape(S,(1,self.K0))
         else:
             self.S = self.S_init
@@ -199,35 +200,6 @@ class IslandsEvoAdaptiveStep:
          # Define idx for next species, if not already defined
         if self.new_species_idx is None:
             self.new_species_idx = max(self.current_species_idx)+1
-
-    def draw_S_distribution(self,num):
-        # Draw from distribution of S
-        # input num: number of draws to make
-        # return S: (num,) vec of S values.
-
-        if self.S_distribution == 'gaussian':
-            S = self.sig_S * np.random.normal(size=(num))
-
-        elif self.S_distribution == 'exponential_tail':
-            p = self.S_tail_power
-
-            min_prob = 1e-12
-            s_max = (np.log(1/min_prob))**(1./p)
-            if s_max > 8:
-                ds = s_max/3e4
-            else:
-                s_max = 8
-                ds = 0.0003
-
-            s_vec = np.arange(0, s_max, ds) #units of sig_S
-            prob_density = np.exp(-s_vec**p)*ds
-            prob_density *= 1/np.sum(prob_density)
-            cum_prob = np.cumsum(prob_density)
-            rand_nums = np.random.rand(num)
-            indices = np.digitize(rand_nums, cum_prob)
-            S = self.sig_S * s_vec[indices]
-
-        return S
 
     def evo_step(self, cur_epoch):
         # Runs dynamics for one epoch. 
@@ -385,7 +357,6 @@ class IslandsEvoAdaptiveStep:
 
         return step_forward
 
-
     def subset_to_surviving_species(self,y0,xbar0,cur_epoch,SavedQuants):
         surviving_bool = xbar0[0, :] > -np.inf  # surviving species out of K1 current species.
         SavedQuants.surviving_bool_list.append(surviving_bool)
@@ -489,11 +460,14 @@ class IslandsEvoAdaptiveStep:
             V_diag = corr_mut* V_new[par_idx,par_idx] + np.sqrt(1 - corr_mut ** 2) * np.sqrt(1 + self.gamma) * np.random.normal()  # diagonal
 
         if self.S_distribution == 'gaussian':
-            s = corr_mut * S_new[0, par_idx] + np.sqrt(1 - corr_mut ** 2) * self.draw_S_distribution(1)
+            s = corr_mut * S_new[0, par_idx] + np.sqrt(1 - corr_mut ** 2) * self.S_generator.draw_from_distribution(1)
         elif self.S_distribution == 'exponential_tail':
             #TODO implement correlated mutation for different S distributions.
             # Need to use random walk process with correct equilibrium distribution.
-            s = self.draw_S_distribution(1)
+            if corr_mut == 0:
+                s = self.S_generator.draw_from_distribution(1)
+            else:
+                s = self.S_generator.diffusion_step(S_new[0,par_idx])
 
         return V_row, V_col, V_diag, s
 
@@ -608,6 +582,71 @@ class IslandsEvoAdaptiveStep:
             else:
                 return False
 
+class S_generator:
+    def __init__(self,distribution,tail_power,sig_S,correlation):
+        self.distribution = distribution
+        self.tail_power = tail_power
+        self.sig_S = sig_S
+        self.correlation = correlation
+
+    def draw_from_distribution(self,num):
+        # Draw from distribution of S
+        # input num: number of draws to make
+        # return S: (num,) vec of S values.
+
+        if self.distribution == 'gaussian':
+            S = self.sig_S * np.random.normal(size=(num))
+
+        elif self.distribution == 'exponential_tail':
+            p = self.tail_power
+
+            min_prob = 1e-12
+            s_max = (np.log(1/min_prob))**(1./p)
+            if s_max > 8:
+                ds = s_max/3e4
+            else:
+                s_max = 8
+                ds = 0.0003
+
+            s_vec = np.arange(0, s_max, ds) #units of sig_S
+            prob_density = np.exp(-np.abs(s_vec)**p)*ds
+            prob_density *= 1/np.sum(prob_density)
+            cum_prob = np.cumsum(prob_density)
+            rand_nums = np.random.rand(num)
+            indices = np.digitize(rand_nums, cum_prob)
+            S = self.sig_S * s_vec[indices]
+        return S
+
+    def diffusion_step(self,s_parent):
+        # Generates next S value from diffusion model
+        # constant diffusion const. approach
+        s = 1.*s_parent
+        t = 0
+        while t<1:
+            diff_const, bias = self.determine_diff_const_bias(s)
+            dt = self.determine_dt(s,diff_const,bias)
+            if dt>1-t:
+                dt = 1-t
+            s = s + bias*dt + np.sqrt(2*diff_const*dt) * np.random.normal()
+            t += dt
+            # print([s,dt])
+        return s
+
+    def determine_diff_const_bias(self,s):
+        diff_const = (1-self.correlation)*self.sig_S**2/2  #diffusion const.  (gives correct corr_mut for gaussian case)
+        bias = - diff_const*self.tail_power * (np.sign(s)/self.sig_S)*np.abs(s/self.sig_S)**(self.tail_power-1)
+        return diff_const, bias
+
+    def determine_dt(self,s,diff_const,bias,fraction = 0.1,dt_min = 0.001):
+        ds = fraction*s
+        dt_bias = np.abs(ds/bias)
+        dt_diff = np.abs((ds)**2/(2*diff_const))
+        dt = np.min(np.array([dt_bias,dt_diff]),axis=0)
+        if dt < dt_min:
+            dt = dt_min
+        return dt
+
+
 class EvoSavedQuantitiesAdaptiveStep:
     # Object that saves quantities.
 
@@ -647,18 +686,24 @@ class EvoSavedQuantitiesAdaptiveStep:
         self.time_vec_dict = {}
 
     def initialize_dicts(self,V,current_species_idx):
+        self.parent_idx_dict = {}
+
+        self.V_diag_dict = {}
+        K = V.shape[0]
+        for ii in range(K):
+            idx0 = current_species_idx[ii]
+            self.V_diag_dict[idx0] = V[ii,ii]
+
         if self.save_interactions:
-            V_dict = {}
+            self.V_dict = {}
             K = V.shape[0]
             for ii in range(K):
                 idx0 = current_species_idx[ii]
                 for jj in range(K):
                     idx1 = current_species_idx[jj]
-                    V_dict[idx0,idx1] = V[ii, jj]
-            self.V_dict = V_dict
-
-        self.parent_idx_dict = {}
-
+                    self.V_dict[idx0,idx1] = V[ii, jj]
+        
+        
     def initialize_epoch(self,D,K,V,S,epoch_time,n_init,current_species_idx):
         self.epoch_time_list.append(epoch_time)
         self.n_init_list.append(n_init)
@@ -752,6 +797,7 @@ class EvoSavedQuantitiesAdaptiveStep:
         for ii in range(K-mu,K):
             new_idx = current_species_idx[ii]
             self.parent_idx_dict[new_idx] = next(parent_idx_iter)
+            self.V_diag_dict[new_idx] = V[ii,ii]
             if self.save_interactions:
                 for jj in range(K):
                     idx = current_species_idx[jj]
@@ -780,7 +826,7 @@ def extend_adaptive_step_sim(file_prefix,epochs = None):
 
     #remove non-parameter keys
     params_dict['K'] = params_dict['K0']
-    nonparams = ['sim_start_time','sim_start_process_time','K0','N']
+    nonparams = ['sim_start_time','sim_start_process_time','K0','N','thresh']
     for nonparam in nonparams:
         params_dict.pop(nonparam)
 
@@ -816,7 +862,7 @@ def extend_adaptive_step_sim(file_prefix,epochs = None):
     invasion_success_eigs = []
     ind = last_ind
     while len(invasion_success_eigs)<params_dict['invasion_criteria_memory']:
-        file = file_prefix + '.{}.npz'.format(last_ind)
+        file = file_prefix + '.{}.npz'.format(ind)
         with np.load(file) as sim_data:
             data = sim_data['data'].item()
             invasion_eigs = np.concatenate(data['invasion_eigs_list'],axis=None)
@@ -825,6 +871,7 @@ def extend_adaptive_step_sim(file_prefix,epochs = None):
         ind -= 1
         if ind<0:
             break
+    invasion_success_eigs = [item for sublist in invasion_success_eigs for item in sublist]
     params_dict['invasion_eigs_init'] = invasion_success_eigs
 
     if epochs is None:
@@ -836,7 +883,7 @@ def extend_adaptive_step_sim(file_prefix,epochs = None):
     Evo.extend_simulation()
 
 
-def combine_save_files(file_prefix):
+def combine_save_files(file_prefix,exclusions = ['V_dict','n_init_list']):
     # Combines data from all save files with the same file_prefix.
 
     file_name = file_prefix + '.params.npz'
@@ -859,17 +906,17 @@ def combine_save_files(file_prefix):
                 data_dict[key] = data[key]
         else:
             for key in data.keys():
-                # if key is 'V_dict':
-                #     break
                 value = data[key]
                 if type(value) is list:
                     data_dict[key].extend(value)
                 elif type(value) is dict:
                     data_dict[key].update(value)
+                else:
+                    data_dict[key] = data[key]
         ind += 1
 
-    data_dict.pop('V_dict',None)
-    data_dict.pop('n_init_list',None)
+    for exluded_key in exclusions:
+        data_dict.pop(key,None)
     file_name = file_prefix
     np.savez(file_name, data = data_dict)
 
